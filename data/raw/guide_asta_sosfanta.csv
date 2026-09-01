@@ -16,7 +16,6 @@ id_fantacalcio,squadra,nome,ruolo,fascia,source
 2134,Lecce,Falcone,P,FASCIA_MEDIA,SOS Fanta guida portieri 2026/27 fornita dall'utente
 7332,Genoa,Bijlow,P,SOPRA_LOW_COST,SOS Fanta guida portieri 2026/27 fornita dall'utente
 7411,Parma,Daffara,P,JOLLY_2,SOS Fanta guida portieri 2026/27 fornita dall'utente
-218,Juventus,Perin,P,JOLLY_2,SOS Fanta guida portieri 2026/27 fornita dall'utente
 7337,Lazio,Motta,P,JOLLY_2,SOS Fanta guida portieri 2026/27 fornita dall'utente
 4236,Sassuolo,Muric,P,LOW_COST_1,SOS Fanta guida portieri 2026/27 fornita dall'utente
 6662,Parma,Corvi,P,LOW_COST_1,SOS Fanta guida portieri 2026/27 fornita dall'utente
@@ -137,7 +136,6 @@ id_fantacalcio,squadra,nome,ruolo,fascia,source
 2038,Sassuolo,Pinamonti,A,FASCIA_ALTA,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 7071,Inter,Esposito F.P.,A,JOLLY_1,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 6572,Roma,Castro S.,A,JOLLY_1,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
-4510,Milan,Leao,A,JOLLY_1,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 6831,Napoli,Neres,A,JOLLY_1,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 2832,Juventus,Boga,A,JOLLY_1,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 7023,Fiorentina,Pellegrino M.,A,JOLLY_1,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
@@ -148,7 +146,6 @@ id_fantacalcio,squadra,nome,ruolo,fascia,source
 6967,Como,Diao,A,FASCIA_MEDIA,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 4923,Genoa,Colombo,A,SOPRA_LOW_COST,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 6669,Inter,Bonny,A,JOLLY_2,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
-5544,Juventus,David,A,JOLLY_2,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 7162,Napoli,Giovane,A,JOLLY_2,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 4359,Bologna,Piccoli,A,JOLLY_2,SOS Fanta guida attaccanti 2026/27 fornita dall'utente
 2155,Monza,Cutrone,A,LOW_COST_1,SOS Fanta guida attaccanti 2026/27 fornita dall'utente

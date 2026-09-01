@@ -470,7 +470,7 @@ export function LeagueSettings({
   const input = (label, path, options = {}) => {
     const value = path.reduce((item, key) => item[key], profile);
     return (
-      <label className="ls-field" key={options.key}>
+      <label className="ls-field" key={options.key ?? path.join(".")}>
         {label}
         <input
           type={options.type ?? "text"}
@@ -540,8 +540,8 @@ export function LeagueSettings({
         await callback(profile);
         setStatus(
           generate
-            ? "Dati rigenerati per questo profilo."
-            : "Profilo aggiornato localmente.",
+            ? "Profilo salvato e dati generati."
+            : "Profilo salvato correttamente.",
         );
         return;
       }
@@ -682,6 +682,12 @@ export function LeagueSettings({
         <div className="ls-grid">
           {input("ID profilo", ["profile_id"], { required: true })}
           {input("Nome del profilo", ["name"], { required: true })}
+          <p className="ls-field-help">
+            L&apos;ID deve essere unico per ogni fantacalcio (es.{" "}
+            <code>fantagobbo</code>, <code>amici-di-ley</code>). Se cambi ID e
+            salvi, crei un profilo nuovo su Supabase; se tieni lo stesso ID,
+            sovrascrivi quello esistente.
+          </p>
           {input("Stagione", ["season", "season"], { required: true })}
           <label className="ls-field">
             Giornate di Serie A

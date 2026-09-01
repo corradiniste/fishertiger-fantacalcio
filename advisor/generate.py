@@ -1,7 +1,6 @@
 """Profile-aware dataset generation, isolated from the HTTP transport."""
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -27,8 +26,9 @@ def load_profile(value: dict[str, Any]) -> Any:
 
 def resolve_profile(
     request: dict[str, Any],
-    profiles_dir: Path,
+    profiles_dir: Path | None = None,
     *,
+    profile_store: Any | None = None,
     profile_loader: ProfileLoader = load_profile,
 ) -> Any:
     """Resolve exactly one inline profile or persisted profile ID."""
@@ -43,13 +43,19 @@ def resolve_profile(
     if not isinstance(saved_id, str) or not PROFILE_ID.fullmatch(saved_id):
         raise ProfileRequestError("A profile object or valid saved profile_id is required.")
 
-    path = profiles_dir / f"{saved_id}.json"
+    store = profile_store
+    if store is None:
+        if profiles_dir is None:
+            raise ProfileRequestError("Profile storage is unavailable.")
+        from .profile_store import LocalProfileStore
+
+        store = LocalProfileStore(profiles_dir)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise ProfileRequestError("The saved profile does not exist.") from error
-    except (OSError, json.JSONDecodeError) as error:
+        value = store.get(saved_id)
+    except Exception as error:
         raise ProfileRequestError("The saved profile is invalid or unreadable.") from error
+    if value is None:
+        raise ProfileRequestError("The saved profile does not exist.")
     if not isinstance(value, dict):
         raise ProfileRequestError("The saved profile must be a JSON object.")
     profile = _validate_profile(value, profile_loader)

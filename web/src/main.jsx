@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import RandomAuctionView from "./random-auction.jsx";
 import { LeagueSettings } from "./league-settings.jsx";
+import { ProfilePicker, ProfileSwitcher } from "./profile-picker.jsx";
 import { normalizeRules } from "./league-rules.js";
 import { activeNominationRole } from "./auction-nomination.js";
 import {
@@ -18,11 +19,17 @@ import {
 import {
   apiUrl,
   auctionDatasetPath,
+  generateProfile,
+  listProfiles,
   loadDatasetUrl,
+  loadProfile,
   rulesFor,
+  saveProfile,
   seasonSimulationPath,
 } from "./profile-client.js";
 import { createRoleValuation, sourceFvm } from "./player-valuation.js";
+
+const ACTIVE_PROFILE_KEY = "fanta.activeProfileId";
 
 const ROLE_LABELS = {
   P: "Portieri",
@@ -48,6 +55,11 @@ function App() {
   const [data, setData] = useState(null);
   const [season, setSeason] = useState(null);
   const [profile, setProfile] = useState(null);
+  const [defaultProfile, setDefaultProfile] = useState(null);
+  const [profileEntries, setProfileEntries] = useState([]);
+  const [bootPhase, setBootPhase] = useState("loading");
+  const [suggestedProfileId, setSuggestedProfileId] = useState("");
+  const [pickerBusyId, setPickerBusyId] = useState("");
   const [profileError, setProfileError] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStatus, setGenerationStatus] = useState("");
@@ -62,14 +74,131 @@ function App() {
     { view: "overview", player: null, team: null },
   ]);
   const [historyIndex, setHistoryIndex] = useState(0);
+
+  const refreshProfileCatalog = async () => {
+    const names = await listProfiles({ apiBase }).catch(() => []);
+    const entries = await Promise.all(
+      names.map(async (id) => {
+        try {
+          const saved = await loadProfile(id, { apiBase });
+          return { id, name: saved?.name || id };
+        } catch {
+          return { id, name: id };
+        }
+      }),
+    );
+    setProfileEntries(entries);
+    return entries;
+  };
+
+  const activateProfile = async (nextProfile, { skipPicker = true } = {}) => {
+    setProfile(nextProfile);
+    setData(null);
+    setSeason(null);
+    setSelectedPlayer(null);
+    setView("overview");
+    setViewHistory([{ view: "overview", player: null, team: null }]);
+    setHistoryIndex(0);
+    if (nextProfile?.profile_id) {
+      try {
+        localStorage.setItem(ACTIVE_PROFILE_KEY, nextProfile.profile_id);
+      } catch {
+        /* ignore quota / private mode */
+      }
+      setSuggestedProfileId(nextProfile.profile_id);
+    }
+    if (skipPicker) setBootPhase("ready");
+  };
+
+  const selectSavedProfile = async (id) => {
+    setProfileError("");
+    setPickerBusyId(id);
+    try {
+      const saved = await loadProfile(id, { apiBase });
+      await activateProfile(saved);
+    } catch (error) {
+      setProfileError(error?.message || "Impossibile aprire il profilo.");
+    } finally {
+      setPickerBusyId("");
+    }
+  };
+
+  const createNewProfile = () => {
+    if (!defaultProfile) return;
+    const draft = {
+      ...defaultProfile,
+      profile_id: "",
+      name: "",
+    };
+    setBootPhase("ready");
+    setProfile(draft);
+    setData(null);
+    setSeason(null);
+    setView("settings");
+    setProfileError("");
+  };
+
   useEffect(() => {
-    fetch(apiUrl("/api/default-profile", apiBase))
-      .then((response) => (response.ok ? response.json() : null))
-      .then(setProfile)
-      .catch(() => setProfile(null));
+    let cancelled = false;
+    (async () => {
+      try {
+        const defaultResponse = await fetch(
+          apiUrl("/api/default-profile", apiBase),
+        );
+        const nextDefault = defaultResponse.ok
+          ? await defaultResponse.json()
+          : null;
+        if (!nextDefault) {
+          if (!cancelled) {
+            setProfile(null);
+            setBootPhase("ready");
+          }
+          return;
+        }
+        if (cancelled) return;
+        setDefaultProfile(nextDefault);
+        const names = await listProfiles({ apiBase }).catch(() => []);
+        if (cancelled) return;
+        const entries = await Promise.all(
+          names.map(async (id) => {
+            try {
+              const saved = await loadProfile(id, { apiBase });
+              return { id, name: saved?.name || id };
+            } catch {
+              return { id, name: id };
+            }
+          }),
+        );
+        if (cancelled) return;
+        setProfileEntries(entries);
+        let remembered = "";
+        try {
+          remembered = localStorage.getItem(ACTIVE_PROFILE_KEY) || "";
+        } catch {
+          remembered = "";
+        }
+        const suggested = entries.some((entry) => entry.id === remembered)
+          ? remembered
+          : entries[0]?.id || "";
+        setSuggestedProfileId(suggested);
+        if (entries.length === 0) {
+          await activateProfile(nextDefault);
+          return;
+        }
+        setBootPhase("pick");
+      } catch {
+        if (!cancelled) {
+          setProfile(null);
+          setBootPhase("ready");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [apiBase]);
   useEffect(() => {
-    if (!profile) return;
+    if (!profile?.profile_id) return;
     const datasetPath = auctionDatasetPath(profile);
     loadDatasetUrl(apiUrl(`/api/datasets/${datasetPath}`, apiBase), { profile })
       .then((nextData) => {
@@ -125,24 +254,19 @@ function App() {
   const activeProfileId =
     profile?.profile_id || data?.meta?.profile?.profile_id || "default";
   const updateProfile = async (nextProfile, generate = false) => {
-    setProfile(nextProfile);
     setProfileError("");
-    if (!generate) return;
     try {
-      const response = await fetch(`${apiBase}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile: nextProfile }),
-      });
-      const payload = await response.json();
-      if (!response.ok || !payload.dataset_path)
-        throw new Error(
-          payload.error?.message || "Generazione non completata.",
-        );
+      const saved = await saveProfile(nextProfile, { apiBase });
+      await activateProfile(saved);
+      await refreshProfileCatalog();
+      if (!generate) return;
+      const payload = await generateProfile(saved, { apiBase });
+      if (!payload.dataset_path)
+        throw new Error("Generazione non completata.");
       setData(
         await loadDatasetUrl(
           apiUrl(`/api/datasets/${payload.dataset_path}`, apiBase),
-          { profile: nextProfile },
+          { profile: saved },
         ),
       );
       setSeason(null);
@@ -151,7 +275,9 @@ function App() {
       setProfileError(
         error instanceof Error
           ? error.message
-          : "Impossibile generare il dataset del profilo.",
+          : generate
+            ? "Impossibile generare il dataset del profilo."
+            : "Impossibile salvare il profilo.",
       );
       throw error;
     }
@@ -198,6 +324,19 @@ function App() {
     ["auction", "Asta live"],
     ["settings", "Impostazioni"],
   ];
+  if (bootPhase === "loading")
+    return <main className="loading">Caricamento profili...</main>;
+  if (bootPhase === "pick")
+    return (
+      <ProfilePicker
+        entries={profileEntries}
+        suggestedId={suggestedProfileId}
+        busyId={pickerBusyId}
+        error={profileError}
+        onSelect={selectSavedProfile}
+        onCreateNew={createNewProfile}
+      />
+    );
   if (!profile)
     return <main className="loading">Caricamento profilo locale...</main>;
   if (!data)
@@ -207,8 +346,22 @@ function App() {
           <div className="view-heading">
             <span className="eyebrow">CONFIGURAZIONE INIZIALE</span>
             <h1>Genera il tuo dataset</h1>
-            <p>Carica il calendario della tua lega nelle Impostazioni e genera i dati per iniziare.</p>
+            <p>
+              Imposta un <strong>ID profilo unico</strong> per ogni fantacalcio
+              (es. fantagobbo, amici-di-ley), carica le fonti e genera i dati.
+            </p>
           </div>
+          {profileEntries.length > 0 && profile.profile_id ? (
+            <ProfileSwitcher
+              entries={profileEntries}
+              activeId={profile.profile_id}
+              onChange={selectSavedProfile}
+              onOpenPicker={() => {
+                setBootPhase("pick");
+                setProfileError("");
+              }}
+            />
+          ) : null}
           <LeagueSettings
             initialProfile={profile}
             leagueCalendar={null}
@@ -221,60 +374,81 @@ function App() {
       </main>
     );
   return (
-    <main className="app-shell">
+    <>
       <header className="app-header">
-        <button className="brand" onClick={() => navigate("overview")}>
-          <span>{profile?.season?.season || "FANTACALCIO"}</span>
-          <strong>Control room</strong>
-        </button>
-        <div
-          className="history-controls"
-          aria-label="Cronologia di navigazione"
-        >
-          <button
-            onClick={() => moveThroughHistory(-1)}
-            disabled={historyIndex === 0}
-            aria-label="Vista precedente"
-            title="Indietro"
-          >
-            &larr;
-          </button>
-          <button
-            onClick={() => moveThroughHistory(1)}
-            disabled={historyIndex === viewHistory.length - 1}
-            aria-label="Vista successiva"
-            title="Avanti"
-          >
-            &rarr;
-          </button>
-        </div>
-        <nav>
-          {nav.map(([id, label]) => (
-            <button
-              key={id}
-              className={view === id ? "active" : ""}
-              onClick={() => navigate(id)}
-            >
-              {label}
+        <div className="app-header-inner">
+          <div className="app-header-identity">
+            <button className="brand" onClick={() => navigate("overview")}>
+              <span>{profile?.season?.season || "FANTACALCIO"}</span>
+              <strong title={profile?.name || profile?.profile_id || "Control room"}>
+                {profile?.name || profile?.profile_id || "Control room"}
+              </strong>
             </button>
-          ))}
-        </nav>
-        <div className="data-status">
-          <i />
-          Dati aggiornati
-          <br />
-          <small>
-            {generationStatus || data.meta?.generato_il?.slice(0, 10) || "profilo locale"}
-          </small>
-          <button
-            className="regenerate-data"
-            onClick={regenerateData}
-            disabled={!profile || isGenerating}
-          >
-            {isGenerating ? "Rigenerazione..." : "Rigenera dati"}
-          </button>
+            <ProfileSwitcher
+              entries={profileEntries}
+              activeId={activeProfileId}
+              disabled={Boolean(pickerBusyId) || isGenerating}
+              onChange={selectSavedProfile}
+              onOpenPicker={() => {
+                setBootPhase("pick");
+                setProfileError("");
+              }}
+            />
+          </div>
+          <nav aria-label="Sezioni">
+            {nav.map(([id, label]) => (
+              <button
+                key={id}
+                className={view === id ? "active" : ""}
+                onClick={() => navigate(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+          <div className="app-header-tools">
+            <div
+              className="history-controls"
+              aria-label="Cronologia di navigazione"
+            >
+              <button
+                onClick={() => moveThroughHistory(-1)}
+                disabled={historyIndex === 0}
+                aria-label="Vista precedente"
+                title="Indietro"
+              >
+                &larr;
+              </button>
+              <button
+                onClick={() => moveThroughHistory(1)}
+                disabled={historyIndex === viewHistory.length - 1}
+                aria-label="Vista successiva"
+                title="Avanti"
+              >
+                &rarr;
+              </button>
+            </div>
+            <div className="data-status">
+              <i />
+              Dati aggiornati
+              <br />
+              <small>
+                {generationStatus ||
+                  data.meta?.generato_il?.slice(0, 10) ||
+                  "profilo locale"}
+              </small>
+              <button
+                className="regenerate-data"
+                onClick={regenerateData}
+                disabled={!profile || isGenerating}
+              >
+                {isGenerating ? "Rigenerazione..." : "Rigenera dati"}
+              </button>
+            </div>
+          </div>
         </div>
       </header>
+      <main className="app-shell">
       {view === "overview" && (
         <Overview
           data={data}
@@ -337,7 +511,8 @@ function App() {
           )}
         </>
       )}
-    </main>
+      </main>
+    </>
   );
 }
 
@@ -664,7 +839,21 @@ function PlayersView({ data, rules, selected, setSelected }) {
   const [query, setQuery] = useState("");
   const [role, setRole] = useState("TUTTI");
   const [team, setTeam] = useState("TUTTE");
+  const [sortBy, setSortBy] = useState("valore");
+  const [sortDir, setSortDir] = useState("desc");
   const valuation = createRoleValuation(data.players, rules);
+  const toggleSort = (key) => {
+    if (sortBy === key) {
+      setSortDir((dir) => (dir === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortBy(key);
+    setSortDir("desc");
+  };
+  const sortValue = (player) =>
+    sortBy === "fantavoto"
+      ? player.proiezione.fantavoto
+      : valuation.normalizedFvm(player);
   const rows = data.players
     .filter(
       (p) =>
@@ -672,8 +861,20 @@ function PlayersView({ data, rules, selected, setSelected }) {
         (team === "TUTTE" || p.squadra === team) &&
         p.nome.toLowerCase().includes(query.toLowerCase()),
     )
-    .sort((a, b) => valuation.normalizedFvm(b) - valuation.normalizedFvm(a));
+    .sort((a, b) => {
+      const delta = sortValue(a) - sortValue(b);
+      if (delta !== 0) return sortDir === "asc" ? delta : -delta;
+      return a.nome.localeCompare(b.nome, "it");
+    });
   const player = selected || rows[0];
+  const sortLabel = (key) =>
+    sortBy === key ? (sortDir === "asc" ? "A-Z" : "Z-A") : "";
+  const ariaSort = (key) =>
+    sortBy === key
+      ? sortDir === "asc"
+        ? "ascending"
+        : "descending"
+      : "none";
   return (
     <section className="data-view">
       <div className="view-heading">
@@ -705,8 +906,28 @@ function PlayersView({ data, rules, selected, setSelected }) {
           <div className="table-head">
             <span>Giocatore</span>
             <span>Disponibilita</span>
-            <span>Valore ruolo</span>
-            <span>Proiezione FV</span>
+            <span>
+              <button
+                type="button"
+                className={`sort-head${sortBy === "valore" ? " active" : ""}`}
+                aria-sort={ariaSort("valore")}
+                onClick={() => toggleSort("valore")}
+              >
+                Valore ruolo
+                <i aria-hidden="true">{sortLabel("valore") || "↕"}</i>
+              </button>
+            </span>
+            <span>
+              <button
+                type="button"
+                className={`sort-head${sortBy === "fantavoto" ? " active" : ""}`}
+                aria-sort={ariaSort("fantavoto")}
+                onClick={() => toggleSort("fantavoto")}
+              >
+                Proiezione FV
+                <i aria-hidden="true">{sortLabel("fantavoto") || "↕"}</i>
+              </button>
+            </span>
           </div>
           {rows.map((p) => (
             <button

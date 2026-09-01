@@ -166,14 +166,22 @@ def _goals(score: float, league: LeagueConfig) -> int:
 
 
 def _calendar_teams(payload: dict[str, Any]) -> list[str]:
-    calendar = payload["calendario_lega"]
+    calendar = payload.get("calendario_lega")
+    if calendar is None:
+        raise ValueError(
+            "calendario_lega is required for simulation. Upload the league calendar in Impostazioni."
+        )
     if isinstance(calendar, dict):
         return list(calendar["teams"])
     return sorted({fixture["home_team"] for fixture in calendar} | {fixture["away_team"] for fixture in calendar})
 
 
 def _calendar_matchdays(payload: dict[str, Any]) -> dict[int, list[dict[str, Any]]]:
-    calendar = payload["calendario_lega"]
+    calendar = payload.get("calendario_lega")
+    if calendar is None:
+        raise ValueError(
+            "calendario_lega is required for simulation. Upload the league calendar in Impostazioni."
+        )
     if isinstance(calendar, dict):
         return {day["number"]: [{"home_team": fixture["home"], "away_team": fixture["away"], "serie_a_matchday": day["serie_a_matchday"]} for fixture in day["fixtures"]] for day in calendar["matchdays"]}
     fixtures: dict[int, list[dict[str, Any]]] = defaultdict(list)

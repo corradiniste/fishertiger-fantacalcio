@@ -1,1 +1,170 @@
-.history-controls{display:flex;gap:4px}.history-controls button{width:30px;height:30px;border:1px solid #405046;border-radius:6px;background:#1b251e;color:#e8eee7;font-size:18px;line-height:1}.history-controls button:hover:not(:disabled){background:#2a3a2e}.history-controls button:disabled{cursor:not-allowed;opacity:.35}@media(max-width:900px){.app-header{height:auto;min-height:66px;gap:14px;flex-wrap:wrap;padding-bottom:12px}.app-header nav{order:3;width:100%;overflow-x:auto}.data-status{margin-left:auto}}@media(max-width:520px){.app-shell{padding:14px 16px 32px}.brand{min-width:150px}.brand strong{font-size:17px}.data-status{display:none}}
+/* App chrome: full-bleed header + compact tool clusters (Operate). */
+
+.app-header {
+  width: 100%;
+  margin: 0 0 28px;
+  border-bottom: 1px solid #334139;
+  background: #121a15;
+}
+
+.app-header-inner {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 12px 32px;
+  min-height: 66px;
+  display: flex;
+  align-items: center;
+  gap: 12px 18px;
+  flex-wrap: wrap;
+}
+
+.app-header-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.app-header .brand {
+  background: transparent;
+  border: 0;
+  text-align: left;
+  padding: 0;
+  min-width: 0;
+  max-width: min(260px, 36vw);
+}
+
+.app-header .brand span {
+  display: block;
+  color: #bce785;
+  font: 11px ui-monospace, monospace;
+  letter-spacing: 0.12em;
+}
+
+.app-header .brand strong {
+  display: block;
+  font-size: 18px;
+  letter-spacing: -0.04em;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-header nav {
+  display: flex;
+  gap: 4px;
+  flex: 1 1 280px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.app-header nav button {
+  border: 0;
+  background: transparent;
+  padding: 10px 12px;
+  color: #aeb9b0;
+  border-radius: 6px;
+  font-weight: 650;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.app-header nav button:hover,
+.app-header nav button.active {
+  background: #263429;
+  color: #fff;
+}
+
+.app-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.app-header .data-status {
+  margin-left: 0;
+  color: #b9c2b9;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.app-header .profile-switcher {
+  margin-left: 0;
+  min-width: 9.5rem;
+  max-width: 14rem;
+}
+
+.app-header .profile-switcher select {
+  max-width: 14rem;
+}
+
+.history-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.history-controls button {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #405046;
+  border-radius: 6px;
+  background: #1b251e;
+  color: #e8eee7;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.history-controls button:hover:not(:disabled) {
+  background: #2a3a2e;
+}
+
+.history-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+@media (max-width: 1000px) {
+  .app-header-inner {
+    padding: 12px 16px;
+  }
+
+  .app-header .data-status {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .app-header-inner {
+    align-items: flex-start;
+  }
+
+  .app-header nav {
+    order: 3;
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .app-header-tools {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .app-header .brand {
+    max-width: min(180px, 48vw);
+  }
+
+  .app-header .brand strong {
+    font-size: 16px;
+  }
+
+  .app-header .profile-switcher {
+    max-width: 11rem;
+    min-width: 8rem;
+  }
+}

@@ -19,13 +19,26 @@ from urllib.parse import unquote, urlparse
 from .generate import (
     PipelineGenerator,
     ProfileRequestError,
-    dataset_manifest,
     generate_dataset,
     load_profile,
     resolve_profile,
 )
+from .data_store import (
+    DataStoreError,
+    PersistenceBundle,
+    create_persistence,
+    guess_content_type,
+    hydrate_profile_sources,
+    push_json_tree,
+)
+from .profile_store import (
+    ProfileStore,
+    ProfileStoreError,
+    load_dotenv_file,
+)
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MAX_BODY_BYTES = 1_000_000
 MAX_UPLOAD_BYTES = 50_000_000
 PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
@@ -66,6 +79,8 @@ class LocalApiServer(ThreadingHTTPServer):
         generator: PipelineGenerator | None = None,
         simulator: SimulationRunner | None = None,
         profile_loader: ProfileLoader = load_profile,
+        profile_store: ProfileStore | None = None,
+        persistence: PersistenceBundle | None = None,
     ) -> None:
         self.profiles_dir = Path(profiles_dir)
         self.datasets_dir = Path(datasets_dir)
@@ -74,6 +89,14 @@ class LocalApiServer(ThreadingHTTPServer):
         self.generator = generator
         self.simulator = simulator or _simulate_current_dataset
         self.profile_loader = profile_loader
+        self.persistence = persistence or create_persistence(
+            profiles_dir=self.profiles_dir,
+            datasets_dir=self.datasets_dir,
+            blob_root=self.uploads_dir.parent,
+        )
+        self.profile_store = profile_store or self.persistence.profiles
+        self.dataset_store = self.persistence.datasets
+        self.blob_store = self.persistence.blobs
         super().__init__(address, LocalApiHandler)
 
 
@@ -121,7 +144,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         if request is None:
             return
         try:
-            profile = resolve_profile(request, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+            profile = resolve_profile(
+                request,
+                self.server.profiles_dir,
+                profile_store=self.server.profile_store,
+                profile_loader=self.server.profile_loader,
+            )
             profile = self._derive_calendar_participants(profile)
         except ProfileRequestError as error:
             self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
@@ -130,9 +158,15 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
             return
         try:
+            hydrate_profile_sources(profile, self.server.blob_store, project_root=PROJECT_ROOT)
             result = generate_dataset(profile, self.server.datasets_dir, generator=self.server.generator)
+            self._persist_season_outputs(profile)
+            result["dataset_manifest"] = self.server.dataset_store.manifest()
         except (FileNotFoundError, ValueError) as error:
             self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
+            return
+        except DataStoreError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Generated data could not be persisted.")
             return
         except Exception:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "generation_failed", "Generation failed.")
@@ -145,7 +179,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         if request is None:
             return
         try:
-            profile = resolve_profile(request, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+            profile = resolve_profile(
+                request,
+                self.server.profiles_dir,
+                profile_store=self.server.profile_store,
+                profile_loader=self.server.profile_loader,
+            )
             profile = self._derive_calendar_participants(profile)
         except ProfileRequestError as error:
             self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
@@ -163,7 +202,15 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         try:
             output_dir = self.server.datasets_dir / profile.profile_id / profile.season.season.replace("/", "-")
+            self._ensure_auction_dataset(output_dir, profile)
             result = self.server.simulator(profile, output_dir, iterations, seed)
+            self._persist_season_outputs(profile)
+        except ValueError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
+            return
+        except DataStoreError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Simulation data could not be persisted.")
+            return
         except Exception:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "simulation_failed", "Simulation failed.")
             return
@@ -180,27 +227,29 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, profile.to_dict())
 
     def _profile_index(self) -> None:
-        directory = self.server.profiles_dir
-        if not directory.exists():
-            self._send_json(HTTPStatus.OK, {"profiles": []})
-            return
-        if not directory.is_dir():
+        try:
+            profiles = self.server.profile_store.list_ids()
+        except ProfileStoreError:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Profile storage is unavailable.")
             return
-        profiles = sorted(path.stem for path in directory.glob("*.json") if path.is_file() and PROFILE_NAME.fullmatch(path.stem))
         self._send_json(HTTPStatus.OK, {"profiles": profiles})
 
     def _get_profile(self, name: str) -> None:
-        profile_path = self._profile_path(name)
-        if profile_path is None:
+        if not self._valid_profile_name(name):
             return
         try:
-            profile = resolve_profile({"profile_id": name}, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+            profile = resolve_profile(
+                {"profile_id": name},
+                self.server.profiles_dir,
+                profile_store=self.server.profile_store,
+                profile_loader=self.server.profile_loader,
+            )
         except ProfileRequestError as error:
-            if not profile_path.exists():
+            message = str(error)
+            if message == "The saved profile does not exist.":
                 self._error(HTTPStatus.NOT_FOUND, "profile_not_found", "The profile does not exist.")
             else:
-                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", str(error))
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", message)
             return
         except OSError:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The stored profile is invalid or unreadable.")
@@ -211,8 +260,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
 
     def _put_profile(self, name: str) -> None:
-        profile_path = self._profile_path(name)
-        if profile_path is None:
+        if not self._valid_profile_name(name):
             return
         value = self._read_json_object()
         if value is None:
@@ -225,12 +273,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
             return
         try:
-            profile_path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=profile_path.parent, delete=False) as handle:
-                json.dump(profile.to_dict(), handle, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-                temporary_path = Path(handle.name)
-            temporary_path.replace(profile_path)
-        except (OSError, TypeError, ValueError):
+            self.server.profile_store.put(name, profile.to_dict())
+        except ProfileStoreError:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The profile could not be saved.")
             return
         self._send_json(HTTPStatus.OK, profile.to_dict())
@@ -262,12 +306,15 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         profile_id, group, source_name = parts
         target = self.server.uploads_dir / profile_id / group / f"{source_name}{suffix}"
         try:
+            content = self.rfile.read(content_length)
             target.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile("wb", dir=target.parent, delete=False) as handle:
-                handle.write(self.rfile.read(content_length))
+                handle.write(content)
                 temporary_path = Path(handle.name)
             temporary_path.replace(target)
-        except OSError:
+            blob_key = f"uploads/{profile_id}/{group}/{source_name}{suffix}"
+            self.server.blob_store.put(blob_key, content, content_type=guess_content_type(blob_key))
+        except (OSError, DataStoreError):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "upload_failed", "The source file could not be stored.")
             return
         self._send_json(HTTPStatus.OK, {"path": str(target), "filename": Path(filename).name, "size": content_length})
@@ -281,11 +328,15 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         except (AttributeError, TypeError, ValueError, KeyError) as error:
             self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
             return
+        try:
+            hydrate_profile_sources(profile, self.server.blob_store, project_root=PROJECT_ROOT)
+        except DataStoreError:
+            pass
         statuses = []
         for group in SOURCE_GROUPS:
             for source in getattr(profile, group):
                 declared = Path(source.path)
-                candidates = [declared] if declared.is_absolute() else [declared, Path.cwd() / declared, Path(__file__).resolve().parents[1] / declared]
+                candidates = [declared] if declared.is_absolute() else [declared, Path.cwd() / declared, PROJECT_ROOT / declared]
                 existing_path = next((candidate for candidate in candidates if candidate.is_file()), None)
                 statuses.append({
                     "group": group,
@@ -324,8 +375,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
     def _dataset_manifest(self) -> None:
         try:
-            self._send_json(HTTPStatus.OK, dataset_manifest(self.server.datasets_dir))
-        except OSError:
+            self._send_json(HTTPStatus.OK, self.server.dataset_store.manifest())
+        except (OSError, DataStoreError):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Dataset storage is unavailable.")
 
     def _get_dataset(self, relative_path: str) -> None:
@@ -333,15 +384,57 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         if dataset_path is None:
             return
         try:
+            if not dataset_path.is_file():
+                payload = self.server.dataset_store.get(relative_path)
+                if payload is None:
+                    self._error(HTTPStatus.NOT_FOUND, "dataset_not_found", "The dataset does not exist.")
+                    return
+                dataset_path.parent.mkdir(parents=True, exist_ok=True)
+                dataset_path.write_text(
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                    encoding="utf-8",
+                )
+                self._send_json(HTTPStatus.OK, payload)
+                return
             with dataset_path.open(encoding="utf-8") as handle:
                 value = json.load(handle)
         except FileNotFoundError:
             self._error(HTTPStatus.NOT_FOUND, "dataset_not_found", "The dataset does not exist.")
             return
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, DataStoreError):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The dataset is invalid or unreadable.")
             return
         self._send_json(HTTPStatus.OK, value)
+
+    def _persist_season_outputs(self, profile: Any) -> None:
+        """Push season JSON (+ non-JSON artifacts) to the configured durable stores."""
+        season_dir = self.server.datasets_dir / profile.profile_id / profile.season.season.replace("/", "-")
+        push_json_tree(season_dir, self.server.dataset_store, relative_root=self.server.datasets_dir)
+        if not season_dir.exists():
+            return
+        for path in sorted(season_dir.rglob("*")):
+            if not path.is_file() or path.suffix.lower() == ".json":
+                continue
+            relative = path.relative_to(self.server.datasets_dir).as_posix()
+            self.server.blob_store.put(
+                f"processed/{relative}",
+                path.read_bytes(),
+                content_type=guess_content_type(relative),
+            )
+
+    def _ensure_auction_dataset(self, output_dir: Path, profile: Any) -> None:
+        auction_path = output_dir / "auction_data.json"
+        if auction_path.is_file():
+            return
+        relative = (Path(profile.profile_id) / profile.season.season.replace("/", "-") / "auction_data.json").as_posix()
+        payload = self.server.dataset_store.get(relative)
+        if payload is None:
+            return
+        auction_path.parent.mkdir(parents=True, exist_ok=True)
+        auction_path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+            encoding="utf-8",
+        )
 
     def _safe_dataset_path(self, relative_path: str) -> Path | None:
         if not relative_path or "\\" in relative_path or not relative_path.endswith(".json"):
@@ -354,9 +447,18 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return None
         return candidate
 
+    def _valid_profile_name(self, name: str) -> bool:
+        if PROFILE_NAME.fullmatch(name):
+            return True
+        self._error(
+            HTTPStatus.BAD_REQUEST,
+            "invalid_profile_name",
+            "Profile names must use letters, numbers, underscores, or hyphens.",
+        )
+        return False
+
     def _profile_path(self, name: str) -> Path | None:
-        if not PROFILE_NAME.fullmatch(name):
-            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile_name", "Profile names must use letters, numbers, underscores, or hyphens.")
+        if not self._valid_profile_name(name):
             return None
         return self.server.profiles_dir / f"{name}.json"
 
@@ -420,9 +522,22 @@ def create_server(
     generator: PipelineGenerator | None = None,
     simulator: SimulationRunner | None = None,
     profile_loader: ProfileLoader = load_profile,
+    profile_store: ProfileStore | None = None,
+    persistence: PersistenceBundle | None = None,
 ) -> LocalApiServer:
     """Create a local API server; inject a pipeline generator for tests or embedding."""
-    return LocalApiServer(address, profiles_dir=profiles_dir, datasets_dir=datasets_dir, uploads_dir=uploads_dir, default_profile_path=default_profile_path, generator=generator, simulator=simulator, profile_loader=profile_loader)
+    return LocalApiServer(
+        address,
+        profiles_dir=profiles_dir,
+        datasets_dir=datasets_dir,
+        uploads_dir=uploads_dir,
+        default_profile_path=default_profile_path,
+        generator=generator,
+        simulator=simulator,
+        profile_loader=profile_loader,
+        profile_store=profile_store,
+        persistence=persistence,
+    )
 
 
 def _simulate_current_dataset(profile: Any, output_dir: Path, iterations: int, seed: int) -> dict[str, Any]:
@@ -434,6 +549,7 @@ def _simulate_current_dataset(profile: Any, output_dir: Path, iterations: int, s
 
 def main(argv: list[str] | None = None) -> None:
     """Run the local API without creating a server during module import."""
+    load_dotenv_file()
     parser = argparse.ArgumentParser(description="Run the local fantasy advisor API.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -441,7 +557,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--datasets-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--uploads-dir", type=Path, default=Path("data/uploads"))
     args = parser.parse_args(argv)
-    server = create_server((args.host, args.port), profiles_dir=args.profiles_dir, datasets_dir=args.datasets_dir, uploads_dir=args.uploads_dir)
+    persistence = create_persistence(
+        profiles_dir=args.profiles_dir,
+        datasets_dir=args.datasets_dir,
+        blob_root=PROJECT_ROOT / "data",
+    )
+    server = create_server(
+        (args.host, args.port),
+        profiles_dir=args.profiles_dir,
+        datasets_dir=args.datasets_dir,
+        uploads_dir=args.uploads_dir,
+        persistence=persistence,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

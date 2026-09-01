@@ -403,8 +403,11 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
     guide_source = sources.get("auction_guide")
     guide_path = _resolve_source(guide_source, raw) if guide_source else raw / "guide_asta_sosfanta.csv"
     guide = pd.read_csv(guide_path) if guide_path.exists() else pd.DataFrame(columns=["id_fantacalcio", "fascia"])
-    if not guide.empty and (guide.id_fantacalcio.duplicated().any() or not set(guide.id_fantacalcio).issubset(set(listone.Id))):
-        raise ValueError("guide_asta_sosfanta: IDs must be unique and present in the listone")
+    if not guide.empty:
+        if guide.id_fantacalcio.duplicated().any():
+            raise ValueError("guide_asta_sosfanta: IDs must be unique")
+        known_ids = set(listone.Id)
+        guide = guide[guide.id_fantacalcio.isin(known_ids)].copy()
     listone = listone[~listone.Id.isin(ceduti.Id.dropna())].copy()
     overrides = load_identity_overrides()
     starter_matches = match_manual(starters, listone, "titolari", overrides)

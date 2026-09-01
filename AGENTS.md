@@ -12,6 +12,7 @@
 - Run the API from the repository root with `.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8000`, then run Vite in a second terminal with `cd web && npm run dev`.
 - The UI workflow requires uploading the private league calendar in **Impostazioni** before generating data. Do not add `data/raw/calendario_lega.xlsx` or other league-identifying inputs to git.
 - `VITE_LOCAL_API_BASE` optionally overrides the client API URL; otherwise it uses `http://127.0.0.1:8000`.
+- Optional durable backend: set `DATA_STORE=supabase` (or `PROFILE_STORE=supabase`) and `SUPABASE_DB_URL` in `.env`. Profiles → `public.profiles`, generated JSON → `public.datasets`, raw/uploads/non-JSON → `public.blobs`. Seed with `.venv/bin/python -m advisor.sync_remote`. Local disk remains a compute cache.
 
 ## Data Workflow
 
