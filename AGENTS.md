@@ -17,6 +17,8 @@
 ## Data Workflow
 
 - Generation must precede simulation: `.venv/bin/python -m advisor.pipeline --profile config/default_profile.json --raw-dir data/raw --output-dir data/processed`, then `.venv/bin/python -m advisor.simulate --profile config/default_profile.json --raw-dir data/raw --output-dir data/processed --iterations 1000 --seed 202627`.
+- Optional Understat refresh before generate: `.venv/bin/python -m advisor.understat --seasons 2026,2025,2024,2023,2022 --out-dir data/raw` (or `POST /api/sources/refresh`). Files land as `data/raw/understat_{year}.json` and are joined during generate.
+- Lazy per-player Understat detail (radar / shot map / matches): `GET /api/players/{fantacalcio_id}/understat?profile_id=...&seasons=...` caches under `data/raw/understat_players/{understat_id}/`.
 - Profile outputs are written under `data/processed/<profile_id>/<season-with-hyphen>/`; simulation expects `auction_data.json` in that directory.
 - Source declarations in the active profile are authoritative for input files and seasons. The pipeline also validates the Serie A calendar and the private league calendar against profile participants and matchday settings.
 

@@ -55,6 +55,16 @@ class LocalApiServerTests(unittest.TestCase):
         connection.close()
         return response, json.loads(payload) if payload else None
 
+    def request_raw(self, method, path, body=None, headers=None):
+        connection = http.client.HTTPConnection(*self.server.server_address)
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        payload = response.read()
+        headers_map = {key.lower(): value for key, value in response.getheaders()}
+        status = response.status
+        connection.close()
+        return status, headers_map, payload
+
     def test_profiles_round_trip_and_index(self):
         body = json.dumps(self.profile).encode("utf-8")
         response, payload = self.request("PUT", "/api/profiles/my-team", body, {"Content-Type": "application/json"})
@@ -270,6 +280,65 @@ class LocalApiServerTests(unittest.TestCase):
         )
         self.assertEqual(response.status, 400)
         self.assertEqual(payload["error"]["code"], "invalid_upload_type")
+
+    def test_auction_export_missing_dataset(self):
+        body = json.dumps(
+            {
+                "profile_id": "my-team",
+                "season": "2026-27",
+                "teams": [{"name": "Alpha", "starting_credits": 750}],
+                "history": [],
+            }
+        ).encode("utf-8")
+        response, payload = self.request(
+            "POST",
+            "/api/auction/export",
+            body,
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status, 409)
+        self.assertEqual(payload["error"]["code"], "auction_data_missing")
+
+    def test_auction_export_ok(self):
+        season_dir = Path(self.temp_dir.name) / "data/processed/my-team/2026-27"
+        season_dir.mkdir(parents=True)
+        (season_dir / "auction_data.json").write_text(
+            json.dumps(
+                {
+                    "players": [
+                        {"id": 1, "nome": "Portiere", "ruolo": "P", "squadra": "MIL"},
+                        {"id": 2, "nome": "Attaccante", "ruolo": "A", "squadra": "ROM"},
+                    ],
+                    "league_rules": {"starting_credits": 750},
+                }
+            ),
+            encoding="utf-8",
+        )
+        body = json.dumps(
+            {
+                "profile_id": "my-team",
+                "season": "2026-27",
+                "teams": [{"name": "Alpha", "starting_credits": 750}],
+                "history": [{"player_id": 1, "owner": 0, "price": 12}],
+                "role_budget_percentages": {"P": 7, "D": 18, "C": 25, "A": 50},
+            }
+        ).encode("utf-8")
+        status, headers, payload = self.request_raw(
+            "POST",
+            "/api/auction/export",
+            body,
+            {"Content-Type": "application/json", "Origin": "http://localhost:5173"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn("attachment", headers["content-disposition"])
+        self.assertIn("colpi_asta_my-team.xlsx", headers["content-disposition"])
+        self.assertTrue(payload.startswith(b"PK"))
+        self.assertEqual(headers.get("access-control-allow-origin"), "http://localhost:5173")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,14 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   ProfileClientError,
+  auctionDatasetPath,
   generateProfile,
+  listProfiles,
   loadDatasetUrl,
   loadProfile,
-  listProfiles,
   normalizeDataset,
+  refreshUnderstatSources,
   rulesFor,
-  auctionDatasetPath,
   saveProfile,
+  waitForUnderstatRefresh,
+  fetchPlayerUnderstat,
 } from "./profile-client.js";
 
 const profile = {
@@ -27,6 +30,16 @@ test("normalizes schema 1.0 metadata and rejects another profile", () => {
   const data = normalizeDataset({ schema_version: "1.0", meta: { profile: { profile_id: "league-a" } }, players: [] }, profile);
   assert.equal(data.legacy, false);
   assert.throws(() => normalizeDataset({ schema_version: "1.0", meta: { profile: { profile_id: "other" } }, players: [] }, profile), (error) => error instanceof ProfileClientError && error.code === "profile_mismatch");
+});
+
+test("accepts schema 1.1 understat datasets", () => {
+  const data = normalizeDataset({
+    schema_version: "1.1",
+    meta: { profile: { profile_id: "league-a" }, understat_current_season: "2025" },
+    players: [{ id: 1, understat: {}, xg90: null }],
+  }, profile);
+  assert.equal(data.schema_version, "1.1");
+  assert.equal(data.legacy, false);
 });
 
 test("accepts legacy payloads and resolves profile rules for league engines", () => {
@@ -94,6 +107,68 @@ test("loadProfile and listProfiles hit the profile endpoints", async () => {
     "http://api.test/api/profiles",
     "http://api.test/api/profiles/league-a",
   ]);
+});
+
+test("refreshUnderstatSources posts seasons and polls status until completed", async () => {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url, ...options });
+    if (String(url).includes("/api/sources/refresh/status")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ job_id: "job-1", status: "completed", paths: ["data/raw/understat_2026.json"] }),
+      };
+    }
+    return {
+      ok: true,
+      status: 202,
+      json: async () => ({ job_id: "job-1", status: "queued", seasons: [2026, 2025] }),
+    };
+  };
+  const started = await refreshUnderstatSources(
+    { seasons: [2026, 2025], force: true, profileId: "league-a" },
+    { apiBase: "http://api.test", fetchImpl },
+  );
+  assert.equal(started.job_id, "job-1");
+  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].url, "http://api.test/api/sources/refresh");
+  assert.deepEqual(JSON.parse(calls[0].body).seasons, [2026, 2025]);
+  const done = await waitForUnderstatRefresh("job-1", {
+    apiBase: "http://api.test",
+    fetchImpl,
+    intervalMs: 1,
+  });
+  assert.equal(done.status, "completed");
+});
+
+test("fetchPlayerUnderstat hits player detail endpoint with seasons and force", async () => {
+  const calls = [];
+  const payload = await fetchPlayerUnderstat(5841, {
+    seasons: [2026, 2025],
+    force: true,
+    profileId: "league-a",
+    apiBase: "http://api.test",
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url, ...options });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          fantacalcio_id: 5841,
+          understat_id: 10967,
+          radar: { stats: ["xG"], seasons: { "2025": { xG: 80 } } },
+          shots: {},
+          matches: [],
+        }),
+      };
+    },
+  });
+  assert.equal(payload.understat_id, 10967);
+  assert.match(calls[0].url, /\/api\/players\/5841\/understat\?/);
+  assert.match(calls[0].url, /profile_id=league-a/);
+  assert.match(calls[0].url, /seasons=2026%2C2025|seasons=2026,2025/);
+  assert.match(calls[0].url, /force=1/);
 });
 
 test("generateProfile posts the profile body to /api/generate", async () => {

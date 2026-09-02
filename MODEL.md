@@ -17,6 +17,20 @@ that season.
 - Fixture projections vary by opponent strength and home/away status while
   preserving the player-level seasonal mean.
 
+## Understat fields (schema 1.1 / model 1.6)
+
+- `player.understat` maps season start-year → aggregates (`xG`, `xA`, `npxG`,
+  `npxA`, `goals`, `assists`, `shots`, `key_passes`, `xGChain`, `xGBuildup`,
+  `games`, `time`, …) plus derived `xg90` / `xa90` / `npxg90` /
+  `overperformance` (goals − xG) using minutes played.
+- `understat_current`, top-level `xg90` / `xa90` / `npxg90` /
+  `overperformance` mirror the profile’s current season when available.
+- These fields are **informative only** and do not alter `event_rates`,
+  projections, or Monte Carlo sampling in this model version.
+- Per-player Understat detail (radar / shots / matches) is fetched lazily via
+  `GET /api/players/{id}/understat` and is **not** stored in `auction_data.json`.
+  Schema remains 1.1; the detail payload is UI-only context.
+
 ## Auction values
 
 - The source FVM is preserved as `fvm_original`.

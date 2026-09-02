@@ -8,6 +8,7 @@ web/dist/
 
 # Private league inputs, generated datasets, and saved profiles may contain private names.
 data/raw/calendario_lega.*
+data/raw/understat_players/
 data/processed/
 data/uploads/
 config/profiles/

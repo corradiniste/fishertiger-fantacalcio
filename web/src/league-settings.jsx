@@ -9,6 +9,10 @@ import {
   supportedValues,
   tieBreakers,
 } from "./league-settings-policies.js";
+import {
+  refreshUnderstatSources,
+  waitForUnderstatRefresh,
+} from "./profile-client.js";
 
 const roles = ["P", "D", "C", "A"];
 const roleBudgetLabels = {
@@ -60,8 +64,15 @@ const historySources = [
   { name: "stats_2024_25", label: "Statistiche 2024/25", path: "data/raw/statistiche_2024_25.xlsx", format: "xlsx", required: true, season: "2024-25" },
   { name: "stats_2023_24", label: "Statistiche 2023/24", path: "data/raw/statistiche_2023_24.xlsx", format: "xlsx", required: true, season: "2023-24" },
 ];
+const understatSources = [
+  { name: "understat_2026", label: "Understat 2026/27", path: "data/raw/understat_2026.json", format: "json", required: false, season: "2026" },
+  { name: "understat_2025", label: "Understat 2025/26", path: "data/raw/understat_2025.json", format: "json", required: false, season: "2025" },
+  { name: "understat_2024", label: "Understat 2024/25", path: "data/raw/understat_2024.json", format: "json", required: false, season: "2024" },
+  { name: "understat_2023", label: "Understat 2023/24", path: "data/raw/understat_2023.json", format: "json", required: false, season: "2023" },
+  { name: "understat_2022", label: "Understat 2022/23", path: "data/raw/understat_2022.json", format: "json", required: false, season: "2022" },
+];
 const sourceLabels = Object.fromEntries(
-  [...currentSources, ...historySources].map(({ name, label }) => [name, label]),
+  [...currentSources, ...historySources, ...understatSources].map(({ name, label }) => [name, label]),
 );
 const mergeSources = (definitions, supplied = []) =>
   definitions.map(({ label: _label, ...definition }) => {
@@ -88,6 +99,7 @@ const defaults = {
   },
   current_sources: currentSources,
   history_sources: historySources,
+  understat_sources: understatSources,
   participants: {
     team_names: ["La mia squadra", "Squadra 2"],
     user_team: "La mia squadra",
@@ -186,6 +198,7 @@ const mergeProfile = (profile = {}, leagueCalendar) => ({
   },
   current_sources: mergeSources(currentSources, profile.current_sources),
   history_sources: mergeSources(historySources, profile.history_sources),
+  understat_sources: mergeSources(understatSources, profile.understat_sources),
 });
 const number = (value) => Number(value);
 
@@ -379,11 +392,13 @@ export function LeagueSettings({
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [sourceStatuses, setSourceStatuses] = useState({});
+  const [understatForce, setUnderstatForce] = useState(false);
+  const [understatBusy, setUnderstatBusy] = useState(false);
   const errorRef = useRef(null);
   const endpoint = (path) => `${apiBase.replace(/\/$/, "")}${path}`;
   const sourceSignature = JSON.stringify(
-    ["current_sources", "history_sources"].flatMap((group) =>
-      profile[group].map((source) => [group, source.name, source.path]),
+    ["current_sources", "history_sources", "understat_sources"].flatMap((group) =>
+      (profile[group] || []).map((source) => [group, source.name, source.path]),
     ),
   );
   const sourcesReady = ["current_sources", "history_sources"].every((group) =>
@@ -392,6 +407,10 @@ export function LeagueSettings({
         !source.required || sourceStatuses[`${group}:${source.name}`] === "present",
     ),
   );
+  const understatPresent = (profile.understat_sources || []).filter(
+    (source) => sourceStatuses[`understat_sources:${source.name}`] === "present",
+  ).length;
+  const understatTotal = (profile.understat_sources || []).length;
   useEffect(() => {
     setProfile(mergeProfile(initialProfile, leagueCalendar));
   }, [initialProfile, leagueCalendar]);
@@ -418,8 +437,8 @@ export function LeagueSettings({
   useEffect(() => {
     const controller = new AbortController();
     const checking = Object.fromEntries(
-      ["current_sources", "history_sources"].flatMap((group) =>
-        profile[group].map((source) => [`${group}:${source.name}`, "checking"]),
+      ["current_sources", "history_sources", "understat_sources"].flatMap((group) =>
+        (profile[group] || []).map((source) => [`${group}:${source.name}`, "checking"]),
       ),
     );
     setSourceStatuses(checking);
@@ -433,14 +452,15 @@ export function LeagueSettings({
         response.ok ? response.json() : Promise.reject(response.status),
       )
       .then(({ sources }) => {
-        setSourceStatuses(
-          Object.fromEntries(
-            sources.map((source) => [
-              `${source.group}:${source.name}`,
-              source.exists ? "present" : "missing",
-            ]),
-          ),
+        const next = Object.fromEntries(
+          Object.keys(checking).map((key) => [key, "missing"]),
         );
+        for (const source of sources || []) {
+          next[`${source.group}:${source.name}`] = source.exists
+            ? "present"
+            : "missing";
+        }
+        setSourceStatuses(next);
       })
       .catch((error) => {
         if (error?.name !== "AbortError")
@@ -599,13 +619,62 @@ export function LeagueSettings({
       setStatus(`Impossibile caricare ${sourceLabels[source.name] || source.name}: ${error.message}.`);
     }
   };
+  const syncUnderstat = async () => {
+    const seasons = (profile.understat_sources || [])
+      .map((source) => Number(source.season))
+      .filter((season) => Number.isInteger(season) && season >= 2014);
+    if (!seasons.length) {
+      setStatus("Nessuna stagione Understat dichiarata nel profilo.");
+      return;
+    }
+    setUnderstatBusy(true);
+    setBusy(true);
+    setStatus(`Download Understat in corso (${seasons.join(", ")})...`);
+    try {
+      const job = await refreshUnderstatSources(
+        {
+          seasons,
+          force: understatForce,
+          autoGenerate: false,
+          profile,
+        },
+        { apiBase },
+      );
+      const done = await waitForUnderstatRefresh(job.job_id, { apiBase });
+      if (done.status === "failed") {
+        throw new Error(done.error || "Refresh Understat non riuscito.");
+      }
+      setStatus(
+        `Understat aggiornato (${(done.paths || []).length} file). Rigenerazione dataset...`,
+      );
+      // Re-check file presence after download.
+      setSourceStatuses((current) => {
+        const next = { ...current };
+        for (const source of profile.understat_sources || []) {
+          next[`understat_sources:${source.name}`] = "present";
+        }
+        return next;
+      });
+      if (onGenerate) {
+        await onGenerate(profile);
+        setStatus("Understat sincronizzato e dataset rigenerato.");
+      } else {
+        setStatus("Understat sincronizzato. Usa «Salva e genera» per aggiornare i giocatori.");
+      }
+    } catch (error) {
+      setStatus(`Understat: ${error.message || "sincronizzazione non riuscita"}.`);
+    } finally {
+      setUnderstatBusy(false);
+      setBusy(false);
+    }
+  };
   const sourceEditor = (key, title) => (
     <div className="ls-source-group">
       <div className="ls-subheading">
         <h3>{title}</h3>
         <span>I file previsti vengono verificati dall'API locale.</span>
       </div>
-      {profile[key].map((source, index) => (
+      {(profile[key] || []).map((source, index) => (
         <div className="ls-source" key={`${key}-${source.name}`}>
           <div className="ls-source-identity">
             <strong>{sourceLabels[source.name] || source.name}</strong>
@@ -640,6 +709,44 @@ export function LeagueSettings({
           </label>
         </div>
       ))}
+    </div>
+  );
+
+  const understatPanel = (
+    <div className="ls-understat">
+      <div className="ls-subheading">
+        <h3>Understat (xG / xA)</h3>
+        <span>
+          Opzionale · {understatPresent}/{understatTotal} file presenti
+        </span>
+      </div>
+      <p className="ls-field-help">
+        Scarica gli aggregati Serie A da Understat e poi rigenera il dataset
+        per vedere xG, xA e overperformance nei dettagli giocatore. Uso
+        personale / lega privata: niente polling automatico.
+      </p>
+      {sourceEditor("understat_sources", "Stagioni Understat")}
+      <div className="ls-understat-actions">
+        <label className="ls-toggle">
+          <input
+            type="checkbox"
+            checked={understatForce}
+            onChange={(event) => setUnderstatForce(event.target.checked)}
+            disabled={busy || understatBusy}
+          />
+          Forza riscaricamento anche se i file esistono già
+        </label>
+        <button
+          type="button"
+          className="ls-understat-sync"
+          disabled={busy || understatBusy || !profile.profile_id}
+          onClick={syncUnderstat}
+        >
+          {understatBusy
+            ? "Sincronizzazione Understat..."
+            : "Sincronizza Understat e rigenera"}
+        </button>
+      </div>
     </div>
   );
   return (
@@ -759,6 +866,12 @@ export function LeagueSettings({
         </div>
         {sourceEditor("current_sources", "Fonti della stagione corrente")}
         {sourceEditor("history_sources", "Fonti storiche")}
+      </fieldset>
+      <fieldset className="ls-understat-fieldset">
+        <legend>
+          <span>xG</span> Understat
+        </legend>
+        {understatPanel}
       </fieldset>
       <fieldset>
         <legend>
@@ -1326,6 +1439,14 @@ export function LeagueSettings({
             ? "Le fonti necessarie sono presenti. Il calendario della lega è facoltativo."
             : "Carica o ripristina le fonti necessarie prima di generare i dati."}
         </p>
+        <button
+          type="button"
+          className="ls-understat-sync"
+          disabled={busy || understatBusy || !profile.profile_id}
+          onClick={syncUnderstat}
+        >
+          {understatBusy ? "Understat..." : "Sincronizza Understat"}
+        </button>
         <button type="submit" disabled={busy}>
           {busy ? "Salvataggio..." : "Salva profilo"}
         </button>

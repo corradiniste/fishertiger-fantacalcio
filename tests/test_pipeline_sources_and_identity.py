@@ -40,6 +40,15 @@ def test_unresolved_matches_are_explicitly_reported():
     assert result.iloc[0].diagnostic == "no confident candidate"
 
 
+def test_understat_sources_are_optional_on_profile():
+    from advisor.league_profile import LeagueProfile
+    from pathlib import Path
+
+    profile = LeagueProfile.load_json(Path(__file__).parents[1] / "config/default_profile.json")
+    assert profile.understat_seasons() == [2026, 2025, 2024, 2023, 2022]
+    assert all(source.required is False for source in profile.understat_sources)
+
+
 def test_ambiguous_matches_are_explicitly_reported():
     listone = pd.DataFrame([
         {"Id": 1, "Nome": "Rossi", "Squadra": "Club"},

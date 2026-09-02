@@ -6,6 +6,13 @@
   "defense_modifier": {"enabled": true, "required_defenders": 4, "table_name": "LEAGUE", "tiers": [{"bonus": 1, "minimum_average": 6.0}, {"bonus": 2, "minimum_average": 6.5}, {"bonus": 3, "minimum_average": 7.0}]},
   "formations": {"allowed": ["3-4-3", "3-5-2", "4-3-3", "4-4-2", "4-5-1", "5-3-2", "5-4-1"]},
   "history_sources": [{"format": "xlsx", "name": "stats_2025_26", "path": "data/raw/statistiche_2025_26.xlsx", "required": true, "season": "2025-26"}, {"format": "xlsx", "name": "stats_2024_25", "path": "data/raw/statistiche_2024_25.xlsx", "required": true, "season": "2024-25"}, {"format": "xlsx", "name": "stats_2023_24", "path": "data/raw/statistiche_2023_24.xlsx", "required": true, "season": "2023-24"}],
+  "understat_sources": [
+    {"format": "json", "name": "understat_2026", "path": "data/raw/understat_2026.json", "required": false, "season": "2026"},
+    {"format": "json", "name": "understat_2025", "path": "data/raw/understat_2025.json", "required": false, "season": "2025"},
+    {"format": "json", "name": "understat_2024", "path": "data/raw/understat_2024.json", "required": false, "season": "2024"},
+    {"format": "json", "name": "understat_2023", "path": "data/raw/understat_2023.json", "required": false, "season": "2023"},
+    {"format": "json", "name": "understat_2022", "path": "data/raw/understat_2022.json", "required": false, "season": "2022"}
+  ],
   "incomplete_lineup": {"policy": "zero_score", "score": 0},
   "name": "Lega di esempio 2026/27",
   "participants": {"team_names": ["Squadra 1", "Squadra 2", "Squadra 3", "Squadra 4", "Squadra 5", "Squadra 6", "Squadra 7", "Squadra 8"], "user_team": "Squadra 1"},

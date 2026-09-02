@@ -281,6 +281,7 @@ class LeagueProfile:
     payouts: PayoutPolicy = field(default_factory=lambda: PayoutPolicy((PayoutPrize(1, 0),), "no_payout"))
     incomplete_lineup: IncompleteLineupPolicy = field(default_factory=lambda: IncompleteLineupPolicy("zero_score", 0))
     auction: AuctionPolicy = field(default_factory=lambda: AuctionPolicy(1, 1, 1, "call"))
+    understat_sources: tuple[SourceDeclaration, ...] = ()
     schema_version: int = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -291,6 +292,10 @@ class LeagueProfile:
         _require(bool(self.history_sources), "at least one history source is required")
         _require(len({source.name for source in self.current_sources}) == len(self.current_sources), "current source names must be unique")
         _require(len({source.season or source.name for source in self.history_sources}) == len(self.history_sources), "history source seasons must be unique")
+        _require(len({source.name for source in self.understat_sources}) == len(self.understat_sources), "understat source names must be unique")
+        for source in self.understat_sources:
+            _require(source.format.lower() == "json", "understat sources must use json format")
+            _require(source.season is not None and str(source.season).strip(), "understat source season is required")
         _require(len(self.participants.team_names) >= len(self.payouts.prizes), "payout ranks cannot exceed participants")
         extra_formation = any(
             int(defenders) < 3 or int(midfielders) < 3
@@ -300,6 +305,15 @@ class LeagueProfile:
             _require(self.bench_switch.max_substitutions <= len(self.bench_switch.bench_roles), "max_substitutions cannot exceed bench size")
         _require(self.roster_slots.P >= self.bench_switch.bench_roles.count("P"), "bench has more goalkeepers than roster")
         _require(self.roster_slots.total >= 11 + len(self.bench_switch.bench_roles), "roster cannot cover XI and bench")
+
+    def understat_seasons(self) -> list[int]:
+        seasons: list[int] = []
+        for source in self.understat_sources:
+            try:
+                seasons.append(int(str(source.season).split("-")[0].split("/")[0]))
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"invalid understat season: {source.season!r}") from error
+        return seasons
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -334,11 +348,20 @@ class LeagueProfile:
             # Profiles saved before the explicit range always represented days 1..N.
             season.setdefault("fantasy_start_matchday", 1)
             season.setdefault("fantasy_end_matchday", season["fantasy_matchdays"])
+            understat_sources = []
+            for item in value.get("understat_sources", []) or []:
+                entry = dict(item)
+                if entry.get("season") is not None:
+                    entry["season"] = str(entry["season"])
+                entry.setdefault("format", "json")
+                entry.setdefault("required", False)
+                understat_sources.append(SourceDeclaration(**entry))
             return cls(
                 profile_id=value["profile_id"], name=value["name"], schema_version=value["schema_version"],
                 season=SeasonSelection(**season),
                 current_sources=tuple(SourceDeclaration(**item) for item in value["current_sources"]),
                 history_sources=tuple(SourceDeclaration(**item) for item in value["history_sources"]),
+                understat_sources=tuple(understat_sources),
                 participants=ParticipantConfig(team_names=tuple(value["participants"]["team_names"]), user_team=value["participants"]["user_team"]),
                 credits=CreditsConfig(**value["credits"]), roster_slots=RosterSlots(**value["roster_slots"]),
                 formations=FormationConfig(allowed=tuple(value["formations"]["allowed"])),

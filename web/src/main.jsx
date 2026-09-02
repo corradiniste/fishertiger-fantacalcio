@@ -17,17 +17,46 @@ import {
   slotsLeft,
 } from "./auction-state.js";
 import {
+  buildExportPayload,
+  requestAuctionExport,
+  triggerBlobDownload,
+} from "./auction-export.js";
+import {
   apiUrl,
   auctionDatasetPath,
+  fetchPlayerUnderstat,
   generateProfile,
   listProfiles,
   loadDatasetUrl,
   loadProfile,
+  refreshUnderstatSources,
   rulesFor,
   saveProfile,
   seasonSimulationPath,
+  waitForUnderstatRefresh,
 } from "./profile-client.js";
 import { createRoleValuation, sourceFvm } from "./player-valuation.js";
+import {
+  METRIC_DEFS,
+  PANEL_METRICS,
+  SHOT_RESULTS,
+  SHOT_RESULT_COLORS,
+  SHOT_SITUATIONS,
+  filterShots,
+  flattenShots,
+  formatMatchRow,
+  formatMetric,
+  hasUnderstat,
+  listXg90,
+  matchHistoryRows,
+  overperformanceTone,
+  pickUnderstatSeason,
+  projectShot,
+  radarPolygon,
+  sparklinePoints,
+  understatIdFor,
+  understatSeasons,
+} from "./understat-panel.js";
 
 const ACTIVE_PROFILE_KEY = "fanta.activeProfileId";
 
@@ -62,6 +91,7 @@ function App() {
   const [pickerBusyId, setPickerBusyId] = useState("");
   const [profileError, setProfileError] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isSyncingUnderstat, setIsSyncingUnderstat] = useState(false);
   const [generationStatus, setGenerationStatus] = useState("");
   const [isSimulating, setIsSimulating] = useState(false);
   const [simulationStatus, setSimulationStatus] = useState("");
@@ -295,6 +325,34 @@ function App() {
       setIsGenerating(false);
     }
   };
+  const syncUnderstat = async () => {
+    if (!profile || isSyncingUnderstat || isGenerating) return;
+    const seasons = (profile.understat_sources || [])
+      .map((source) => Number(source.season))
+      .filter((season) => Number.isInteger(season) && season >= 2014);
+    const targetSeasons = seasons.length ? seasons : [2026, 2025, 2024, 2023, 2022];
+    setIsSyncingUnderstat(true);
+    setGenerationStatus(`Understat: download ${targetSeasons.join(", ")}...`);
+    try {
+      const job = await refreshUnderstatSources(
+        { seasons: targetSeasons, force: false, autoGenerate: false, profile },
+        { apiBase },
+      );
+      const done = await waitForUnderstatRefresh(job.job_id, { apiBase });
+      if (done.status === "failed") {
+        throw new Error(done.error || "Refresh Understat non riuscito.");
+      }
+      setGenerationStatus("Understat ok. Rigenerazione dataset...");
+      await updateProfile(profile, true);
+      setGenerationStatus("Understat sincronizzato.");
+    } catch (error) {
+      setGenerationStatus(
+        `Understat: ${error instanceof Error ? error.message : "sync fallita"}.`,
+      );
+    } finally {
+      setIsSyncingUnderstat(false);
+    }
+  };
   const rerunSimulation = async () => {
     if (isSimulating) return;
     setIsSimulating(true);
@@ -440,9 +498,17 @@ function App() {
               <button
                 className="regenerate-data"
                 onClick={regenerateData}
-                disabled={!profile || isGenerating}
+                disabled={!profile || isGenerating || isSyncingUnderstat}
               >
                 {isGenerating ? "Rigenerazione..." : "Rigenera dati"}
+              </button>
+              <button
+                className="regenerate-data understat-sync"
+                onClick={syncUnderstat}
+                disabled={!profile || isGenerating || isSyncingUnderstat}
+                title="Scarica aggregati Understat e rigenera il dataset"
+              >
+                {isSyncingUnderstat ? "Understat..." : "Sync Understat"}
               </button>
             </div>
           </div>
@@ -462,6 +528,11 @@ function App() {
           rules={activeRules}
           selected={selectedPlayer}
           setSelected={setSelectedPlayer}
+          apiBase={apiBase}
+          profileId={activeProfileId}
+          profileSeasons={(profile?.understat_sources || [])
+            .map((source) => Number(source.season))
+            .filter((value) => Number.isFinite(value))}
         />
       )}
       {view === "teams" && (
@@ -493,6 +564,7 @@ function App() {
           openPlayer={openPlayer}
           rules={activeRules}
           profileId={activeProfileId}
+          apiBase={apiBase}
         />
       )}
       {view === "settings" && (
@@ -835,7 +907,7 @@ function Overview({ data, openPlayer, openTeam }) {
   );
 }
 
-function PlayersView({ data, rules, selected, setSelected }) {
+function PlayersView({ data, rules, selected, setSelected, apiBase, profileId, profileSeasons }) {
   const [query, setQuery] = useState("");
   const [role, setRole] = useState("TUTTI");
   const [team, setTeam] = useState("TUTTE");
@@ -929,7 +1001,9 @@ function PlayersView({ data, rules, selected, setSelected }) {
               </button>
             </span>
           </div>
-          {rows.map((p) => (
+          {rows.map((p) => {
+            const xg90 = listXg90(p);
+            return (
             <button
               className={player?.id === p.id ? "selected" : ""}
               key={p.id}
@@ -946,19 +1020,399 @@ function PlayersView({ data, rules, selected, setSelected }) {
                 {p.disponibilita.status.replace("_", " ")}
               </span>
               <strong>{valuation.normalizedFvm(p).toFixed(1)}</strong>
-              <span>{p.proiezione.fantavoto.toFixed(2)}</span>
+              <span className="fv-cell">
+                <em>{p.proiezione.fantavoto.toFixed(2)}</em>
+                {xg90 != null && (
+                  <small className="xg90-badge" title="xG per 90 (Understat)">
+                    xG90 {xg90.toFixed(2)}
+                    <i style={{ width: `${Math.min(100, xg90 * 80)}%` }} aria-hidden="true" />
+                  </small>
+                )}
+              </span>
             </button>
-          ))}
+            );
+          })}
         </div>
         {player && (
-          <PlayerDetail player={player} valuation={valuation} />
+          <PlayerDetail
+            player={player}
+            valuation={valuation}
+            apiBase={apiBase}
+            profileId={profileId}
+            profileSeasons={profileSeasons}
+          />
         )}
       </div>
     </section>
   );
 }
 
-function PlayerDetail({ player, valuation }) {
+function UnderstatPanel({ player, apiBase, profileId, profileSeasons }) {
+  const seasons = understatSeasons(player);
+  const [season, setSeason] = useState(() => pickUnderstatSeason(player));
+  const [detail, setDetail] = useState(null);
+  const [detailStatus, setDetailStatus] = useState("idle");
+  const [detailError, setDetailError] = useState("");
+  const [situations, setSituations] = useState(() => [...SHOT_SITUATIONS]);
+  const [results, setResults] = useState(() => [...SHOT_RESULTS]);
+  const [historyPage, setHistoryPage] = useState(0);
+  const [historySort, setHistorySort] = useState("date_desc");
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    setSeason(pickUnderstatSeason(player, season));
+  }, [player.id]);
+
+  useEffect(() => {
+    if (!hasUnderstat(player) || understatIdFor(player) == null || !profileId) {
+      setDetail(null);
+      setDetailStatus("idle");
+      return undefined;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setDetailStatus("loading");
+    setDetailError("");
+    const timer = window.setTimeout(async () => {
+      try {
+        const seasonsArg =
+          Array.isArray(profileSeasons) && profileSeasons.length
+            ? profileSeasons
+            : seasons.map(Number).filter((value) => Number.isFinite(value));
+        const payload = await fetchPlayerUnderstat(player.id, {
+          seasons: seasonsArg,
+          profileId,
+          apiBase,
+          signal: controller.signal,
+        });
+        if (cancelled) return;
+        setDetail(payload);
+        setDetailStatus("ready");
+        setHistoryPage(0);
+      } catch (error) {
+        if (cancelled || controller.signal.aborted) return;
+        if (error?.cause?.name === "AbortError" || error?.name === "AbortError") return;
+        setDetail(null);
+        setDetailStatus("error");
+        setDetailError(error?.message || "Dettagli Understat non disponibili.");
+      }
+    }, 200);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [player.id, profileId, apiBase, reloadToken]);
+
+  if (!hasUnderstat(player)) {
+    return (
+      <section className="understat-panel empty" aria-label="Understat">
+        <div className="understat-head">
+          <h3>Understat</h3>
+        </div>
+        <p>
+          Dati Understat non disponibili per questo giocatore. In{" "}
+          <strong>Impostazioni</strong> usa{" "}
+          <em>Sincronizza Understat e rigenera</em>, poi ricontrolla qui.
+        </p>
+      </section>
+    );
+  }
+  const activeSeason = season && player.understat[season] ? season : seasons[0];
+  const stats = player.understat[activeSeason];
+  const delta = stats.overperformance;
+  const tone = overperformanceTone(delta);
+  const xgSpark = sparklinePoints(player, "xG");
+  const xaSpark = sparklinePoints(player, "xA");
+  const barMax = Math.max(Math.abs(Number(delta) || 0), Number(stats.xG) || 0, Number(stats.goals) || 0, 1);
+  const barPct = Math.min(50, (Math.abs(Number(delta) || 0) / barMax) * 50);
+
+  const radar = detail?.radar;
+  const poly = radar ? radarPolygon(radar, activeSeason) : null;
+  const flatShots = flattenShots(detail?.shots);
+  const seasonShots = filterShots(flatShots, {
+    seasons: [activeSeason],
+    situations,
+    results,
+  });
+  const projected = seasonShots.map((shot) => ({ shot, ...projectShot(shot) }));
+  const historyRows = matchHistoryRows(detail?.matches || [], { sort: historySort });
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(historyRows.length / pageSize));
+  const pageRows = historyRows.slice(historyPage * pageSize, historyPage * pageSize + pageSize);
+
+  const toggleChip = (value, list, setList) => {
+    setList((current) =>
+      current.includes(value) ? current.filter((item) => item !== value) : [...current, value],
+    );
+  };
+
+  return (
+    <section className="understat-panel" aria-label="Understat">
+      <div className="understat-head">
+        <div>
+          <h3>Understat</h3>
+          <p>Aggregati stagione · xG su minuti giocati</p>
+        </div>
+        <label>
+          Stagione
+          <select
+            value={activeSeason}
+            onChange={(event) => setSeason(event.target.value)}
+            aria-label="Stagione Understat"
+          >
+            {seasons.map((value) => (
+              <option key={value} value={value}>
+                {value}/{String(Number(value) + 1).slice(-2)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className={`overperf-bar ${tone}`} role="img" aria-label={`Overperformance ${formatMetric(delta, "overperformance")}`}>
+        <span>Gol {stats.goals}</span>
+        <div className="overperf-track">
+          <i
+            className={tone === "under" ? "neg" : "pos"}
+            style={
+              tone === "under"
+                ? { width: `${barPct}%`, marginLeft: `${50 - barPct}%` }
+                : { width: `${barPct}%`, marginLeft: "50%" }
+            }
+          />
+          <b>{delta >= 0 ? "+" : ""}{formatMetric(delta, "overperformance")}</b>
+        </div>
+        <span>xG {formatMetric(stats.xG, "xG")}</span>
+      </div>
+      <div className="understat-metrics">
+        {PANEL_METRICS.map((key) => (
+          <div key={key} title={METRIC_DEFS[key] || key}>
+            <span>{key}</span>
+            <b>{formatMetric(stats[key], key)}</b>
+          </div>
+        ))}
+      </div>
+      {(xgSpark.points || xaSpark.points) && (
+        <div className="understat-sparklines" aria-hidden="true">
+          <figure>
+            <figcaption>xG</figcaption>
+            <svg viewBox="0 0 120 28" width="120" height="28">
+              <polyline className="spark xg" points={xgSpark.points} />
+            </svg>
+          </figure>
+          <figure>
+            <figcaption>xA</figcaption>
+            <svg viewBox="0 0 120 28" width="120" height="28">
+              <polyline className="spark xa" points={xaSpark.points} />
+            </svg>
+          </figure>
+        </div>
+      )}
+
+      <div className="understat-detail" aria-busy={detailStatus === "loading"}>
+        <div className="understat-detail-head">
+          <h4>Dettagli Understat</h4>
+          <p>Radar · mappa tiri · partite (lazy)</p>
+        </div>
+
+        {detailStatus === "loading" && (
+          <div className="understat-skeleton" role="status">
+            <span />
+            <span />
+            <span />
+          </div>
+        )}
+
+        {detailStatus === "error" && (
+          <div className="understat-detail-error" role="alert">
+            <p>{detailError || "Dettagli non disponibili"}</p>
+            <button type="button" onClick={() => setReloadToken((value) => value + 1)}>
+              Riprova
+            </button>
+          </div>
+        )}
+
+        {detailStatus === "ready" && !radar && !projected.length && !historyRows.length && (
+          <p className="understat-detail-empty">Dettagli non disponibili per questo giocatore.</p>
+        )}
+
+        {detailStatus === "ready" && radar && poly && (
+          <figure className="understat-radar">
+            <figcaption>Radar {activeSeason}/{String(Number(activeSeason) + 1).slice(-2)}</figcaption>
+            <svg viewBox={`0 0 ${poly.size} ${poly.size}`} width="200" height="200" role="img" aria-label="Radar ratings Understat">
+              {[0.25, 0.5, 0.75, 1].map((scale) => (
+                <circle
+                  key={scale}
+                  className="radar-ring"
+                  cx={poly.cx}
+                  cy={poly.cy}
+                  r={poly.radius * scale}
+                />
+              ))}
+              {poly.axes.map((axis) => (
+                <g key={axis.label}>
+                  <line className="radar-axis" x1={poly.cx} y1={poly.cy} x2={axis.x} y2={axis.y} />
+                  <text className="radar-label" x={axis.lx} y={axis.ly} textAnchor="middle" dominantBaseline="middle">
+                    {axis.label}
+                  </text>
+                </g>
+              ))}
+              <polygon className="radar-poly" points={poly.points} />
+            </svg>
+          </figure>
+        )}
+
+        {detailStatus === "ready" && (
+          <div className="understat-shotmap">
+            <div className="understat-shotmap-head">
+              <h5>Shot map</h5>
+              <span>{projected.length} tiri · {activeSeason}</span>
+            </div>
+            <div className="understat-chips" role="group" aria-label="Filtro situazione">
+              {SHOT_SITUATIONS.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={situations.includes(value) ? "active" : ""}
+                  aria-pressed={situations.includes(value)}
+                  onClick={() => toggleChip(value, situations, setSituations)}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+            <div className="understat-chips" role="group" aria-label="Filtro risultato">
+              {SHOT_RESULTS.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={results.includes(value) ? "active" : ""}
+                  aria-pressed={results.includes(value)}
+                  onClick={() => toggleChip(value, results, setResults)}
+                  style={{ ["--chip-accent"]: SHOT_RESULT_COLORS[value] }}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+            <svg className="shotmap-pitch" viewBox="0 0 100 65" role="img" aria-label="Mappa tiri">
+              <rect className="pitch-bg" x="0" y="0" width="100" height="65" rx="1.5" />
+              <line className="pitch-line" x1="0" y1="32.5" x2="100" y2="32.5" />
+              <rect className="pitch-box" x="18" y="0" width="64" height="16" />
+              <rect className="pitch-box" x="36" y="0" width="28" height="6" />
+              {projected.map((item, index) => (
+                <circle
+                  key={`${item.shot.id || index}-${item.shot.minute || index}`}
+                  cx={item.cx}
+                  cy={item.cy}
+                  r={item.r}
+                  fill={item.fill}
+                  opacity={0.35 + Math.min(0.55, item.xg * 1.2)}
+                >
+                  <title>
+                    {item.result} · xG {item.xg.toFixed(2)} · {item.situation} · min {item.shot.minute ?? "—"}
+                  </title>
+                </circle>
+              ))}
+            </svg>
+            {!projected.length && (
+              <p className="understat-detail-empty">Nessun tiro per i filtri selezionati.</p>
+            )}
+          </div>
+        )}
+
+        {detailStatus === "ready" && (
+          <div className="understat-history">
+            <div className="understat-history-head">
+              <h5>Match history</h5>
+              <button
+                type="button"
+                className="history-sort"
+                onClick={() => {
+                  setHistorySort((value) => (value === "date_desc" ? "date_asc" : "date_desc"));
+                  setHistoryPage(0);
+                }}
+              >
+                Data {historySort === "date_desc" ? "↓" : "↑"}
+              </button>
+            </div>
+            <div className="understat-history-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Home</th>
+                    <th>Score</th>
+                    <th>Away</th>
+                    <th>Pos</th>
+                    <th>Min</th>
+                    <th>Sh</th>
+                    <th>G</th>
+                    <th>KP</th>
+                    <th>A</th>
+                    <th>xG</th>
+                    <th>xA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageRows.map((row) => {
+                    const cells = formatMatchRow(row);
+                    return (
+                      <tr key={row.id || `${row.date}-${row.home}-${row.away}`}>
+                        <td>{cells.date}</td>
+                        <td>{cells.home}</td>
+                        <td className="num">{cells.score}</td>
+                        <td>{cells.away}</td>
+                        <td>{cells.position}</td>
+                        <td className="num">{cells.time}</td>
+                        <td className="num">{cells.shots}</td>
+                        <td className="num">{cells.goals}</td>
+                        <td className="num">{cells.kp}</td>
+                        <td className="num">{cells.assists}</td>
+                        <td className="num" title={cells.xGDelta != null ? `Δ ${cells.xGDelta >= 0 ? "+" : ""}${cells.xGDelta.toFixed(2)}` : undefined}>
+                          {cells.xG}
+                        </td>
+                        <td className="num" title={cells.xADelta != null ? `Δ ${cells.xADelta >= 0 ? "+" : ""}${cells.xADelta.toFixed(2)}` : undefined}>
+                          {cells.xA}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {!historyRows.length && (
+              <p className="understat-detail-empty">Nessuna partita in cache Understat.</p>
+            )}
+            {historyRows.length > pageSize && (
+              <div className="understat-history-pager">
+                <button
+                  type="button"
+                  disabled={historyPage <= 0}
+                  onClick={() => setHistoryPage((value) => Math.max(0, value - 1))}
+                >
+                  Prev
+                </button>
+                <span>
+                  {historyPage + 1}/{pageCount}
+                </span>
+                <button
+                  type="button"
+                  disabled={historyPage >= pageCount - 1}
+                  onClick={() => setHistoryPage((value) => Math.min(pageCount - 1, value + 1))}
+                >
+                  Next
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function PlayerDetail({ player, valuation, apiBase, profileId, profileSeasons }) {
   const history = Object.entries(player.storico);
   const outliers = valuation.outliersFor(player);
   return (
@@ -1031,6 +1485,12 @@ function PlayerDetail({ player, valuation }) {
           <p>Nessuno storico nel listone.</p>
         )}
       </div>
+      <UnderstatPanel
+        player={player}
+        apiBase={apiBase}
+        profileId={profileId}
+        profileSeasons={profileSeasons}
+      />
       <div className="note">
         <b>{player.disponibilita.status.replace("_", " ")}</b>
         <p>{player.disponibilita.nota || "Stima ricavata dallo storico."}</p>
@@ -1092,6 +1552,11 @@ function TeamsView({ data, selectedTeam, setSelectedTeam, openPlayer }) {
             <b>
               {team.xg_prec ?? "—"} / {team.xga_prec ?? "—"}
             </b>
+            {team.understat_xg != null && (
+              <small className="understat-team-note">
+                Understat xG {Number(team.understat_xg).toFixed(1)}
+              </small>
+            )}
           </span>
         </div>
       </section>
@@ -1359,7 +1824,7 @@ function AuctionOverview({ overview }) {
   );
 }
 
-function Auction({ data, openPlayer, rules, profileId }) {
+function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
   const activeRules = normalizeRules(
     rules ?? data.league_rules ?? { startingCredits: 750 },
   );
@@ -1407,6 +1872,7 @@ function Auction({ data, openPlayer, rules, profileId }) {
   );
   const [messageType, setMessageType] = useState("info");
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const worker = useRef();
   const skipPersist = useRef(false);
   const workerHistory = state.history.flatMap((transaction) => {
@@ -1635,6 +2101,38 @@ function Auction({ data, openPlayer, rules, profileId }) {
     setMessage("Asta azzerata. Puoi impostare di nuovo i crediti iniziali.");
     setMessageType("success");
   };
+  const exportXls = async () => {
+    if (!state.history.length || isExporting) return;
+    const season =
+      data.meta?.profile?.season ||
+      data.meta?.season ||
+      activeRules.season ||
+      "";
+    const payload = buildExportPayload(state, {
+      profileId: activeProfileId,
+      season,
+      roleBudgetPercentages: activeRules.auction?.roleBudgetPercentages,
+    });
+    if (!payload.season) {
+      setMessage("Stagione profilo mancante: impossibile esportare.");
+      setMessageType("error");
+      return;
+    }
+    setIsExporting(true);
+    setMessage("Preparazione export XLS...");
+    setMessageType("info");
+    try {
+      const { blob, filename } = await requestAuctionExport(payload, { apiBase });
+      triggerBlobDownload(blob, filename);
+      setMessage(`Export pronto: ${filename}`);
+      setMessageType("success");
+    } catch (error) {
+      setMessage(error?.message || "Export XLS non riuscito.");
+      setMessageType("error");
+    } finally {
+      setIsExporting(false);
+    }
+  };
   const canSetStartingCredits =
     state.history.length === 0 && !state.undone?.length;
   const selectedLegalMax = legalMaxBid(state.teams[owner], activeRules);
@@ -1785,6 +2283,17 @@ function Auction({ data, openPlayer, rules, profileId }) {
           <button onClick={redo} disabled={!state.undone?.length}>
             Ripristina
           </button>
+          {state.history.length > 0 && (
+            <button
+              type="button"
+              className="export-xls"
+              onClick={exportXls}
+              disabled={isExporting}
+              aria-busy={isExporting || undefined}
+            >
+              {isExporting ? "Export in corso..." : "Esporta XLS"}
+            </button>
+          )}
           <button className="flush" onClick={flushAuction}>
             Flush asta
           </button>

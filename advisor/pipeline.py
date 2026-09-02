@@ -17,6 +17,8 @@ from rapidfuzz import fuzz
 from .config import LeagueConfig, ModelConfig
 from .league_calendar import preprocess_legacy_calendar, validate_calendar
 from .league_profile import LeagueProfile
+from .understat import load_understat
+from .understat_match import match_understat
 
 RAW = Path("data/raw")
 PROCESSED = Path("data/processed")
@@ -207,6 +209,12 @@ def load_identity_overrides(path: Path | None = None) -> dict[tuple[str, str, st
         raise ValueError("identity override archive must be a list or contain an overrides list")
     result = {}
     for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"invalid identity override: {entry!r}")
+        # Understat-only rows ({id_fantacalcio, id_understat}) live in the same
+        # archive but are consumed by understat_match, not by Fantacalcio matching.
+        if "source" not in entry and "id_understat" in entry:
+            continue
         try:
             key = (str(entry["source"]), normalize(entry["name"]), normalize(entry["team"]))
             player_id = int(entry["id_fantacalcio"])
@@ -415,7 +423,26 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
     output = output / profile.profile_id / profile.season.season.replace("/", "-") if profile else output
     output.mkdir(parents=True, exist_ok=True)
     review = pd.concat([starter_matches, piece_matches])
-    review[~review.metodo.isin(["auto", "manuale", "override"])].to_csv(output / "matching_review.csv", index=False)
+    # Understat enrichment is informative only; missing files leave understat empty.
+    understat_seasons = profile.understat_seasons() if profile else []
+    understat_raw = load_understat(raw, understat_seasons) if understat_seasons else {}
+    fantacalcio_index = [
+        {"id": int(row.Id), "nome": row.Nome, "squadra": row.Squadra}
+        for _, row in listone.iterrows()
+    ]
+    understat_matched, understat_review = match_understat(fantacalcio_index, understat_raw) if understat_raw else ({}, [])
+    if understat_review:
+        understat_review_frame = pd.DataFrame(understat_review)
+        review = pd.concat([review, understat_review_frame], ignore_index=True, sort=False)
+    review[~review.metodo.isin(["auto", "manuale", "override", "exact", "fuzzy"])].to_csv(output / "matching_review.csv", index=False)
+    current_understat_season = str(max(understat_seasons)) if understat_seasons else None
+    if profile and understat_seasons:
+        try:
+            profile_start = int(str(profile.season.season).split("/")[0].split("-")[0])
+            if profile_start in understat_seasons:
+                current_understat_season = str(profile_start)
+        except (TypeError, ValueError):
+            pass
     starter_status = starters.copy()
     starter_status["id_matched"] = starter_matches.id_matched.values
     pieces = set_pieces.copy()
@@ -473,7 +500,37 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
                 historical[season] = _clean_record(rows.iloc[0][["Pv", "Mv", "Fm", "Gf", "Gs", "Rp", "Rc", "R+", "R-", "Ass", "Amm", "Esp", "Au"]].to_dict())
         event_rates = {"gol": round(goal, 4), "assist": round(assist, 4), "ammonizioni": round(yellow, 4), "espulsioni": round(red, 4), "autogol": round(autogoal, 4), "gol_subiti": round(conceded, 4)}
         daily_play, daily_vote, daily_std, daily_bonus = fixture_projection_arrays(p_play, mv, std, bonus, team, fixtures_by_team.get(player.Squadra, {}), teams_by_key, config.season_days)
-        players.append({"id": int(player.Id), "nome": player.Nome, "ruolo": player.R, "ruoli_mantra": player.RM, "squadra": player.Squadra, "team_id": normalize(player.Squadra), "quotazioni": {"attuale": int(player["Qt.A"]), "iniziale": int(player["Qt.I"]), "differenza": int(player["Diff."])}, "fvm_original": round(float(player.FVM), 2), "fvm_scaled": round(float(player.FVM) * .75, 2), "guida_asta_fascia": guide_entry.iloc[0].fascia if not guide_entry.empty else None, "disponibilita": {"status": status.iloc[0] if not status.empty else "NON_CLASSIFICATO", "nota": starter_entry.iloc[0].note if not starter_entry.empty else None}, "storico": historical, "proiezione": {"p_gioca": round(p_play, 4), "voto_puro": round(mv, 3), "deviazione": round(std, 3), "bonus": round(bonus, 3), "fantavoto": round(mv + bonus, 3)}, "event_rates": event_rates, "p_gioca_per_giornata": [round(value, 4) for value in daily_play], "voto_puro_mean_per_giornata": [round(value, 3) for value in daily_vote], "voto_puro_std_per_giornata": [round(value, 3) for value in daily_std], "bonus_atteso_per_giornata": [round(value, 3) for value in daily_bonus]})
+        understat_seasons_for_player = understat_matched.get(int(player.Id), {}) or {}
+        understat_current = understat_seasons_for_player.get(current_understat_season) if current_understat_season else None
+        if understat_current is None and understat_seasons_for_player:
+            newest = sorted(understat_seasons_for_player.keys(), key=lambda value: int(value), reverse=True)[0]
+            understat_current = understat_seasons_for_player[newest]
+        players.append({
+            "id": int(player.Id),
+            "nome": player.Nome,
+            "ruolo": player.R,
+            "ruoli_mantra": player.RM,
+            "squadra": player.Squadra,
+            "team_id": normalize(player.Squadra),
+            "quotazioni": {"attuale": int(player["Qt.A"]), "iniziale": int(player["Qt.I"]), "differenza": int(player["Diff."])},
+            "fvm_original": round(float(player.FVM), 2),
+            "fvm_scaled": round(float(player.FVM) * .75, 2),
+            "guida_asta_fascia": guide_entry.iloc[0].fascia if not guide_entry.empty else None,
+            "disponibilita": {"status": status.iloc[0] if not status.empty else "NON_CLASSIFICATO", "nota": starter_entry.iloc[0].note if not starter_entry.empty else None},
+            "storico": historical,
+            "proiezione": {"p_gioca": round(p_play, 4), "voto_puro": round(mv, 3), "deviazione": round(std, 3), "bonus": round(bonus, 3), "fantavoto": round(mv + bonus, 3)},
+            "event_rates": event_rates,
+            "understat": understat_seasons_for_player,
+            "understat_current": understat_current,
+            "xg90": understat_current.get("xg90") if understat_current else None,
+            "xa90": understat_current.get("xa90") if understat_current else None,
+            "npxg90": understat_current.get("npxg90") if understat_current else None,
+            "overperformance": understat_current.get("overperformance") if understat_current else None,
+            "p_gioca_per_giornata": [round(value, 4) for value in daily_play],
+            "voto_puro_mean_per_giornata": [round(value, 3) for value in daily_vote],
+            "voto_puro_std_per_giornata": [round(value, 3) for value in daily_std],
+            "bonus_atteso_per_giornata": [round(value, 3) for value in daily_bonus],
+        })
     # Browser JSON parsing rejects Python's non-standard NaN spelling in blank score columns.
     calendar_records = calendar.astype(object).where(pd.notna(calendar), None).to_dict(orient="records")
     for match in calendar_records:
@@ -484,6 +541,16 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         record = _clean_record(team.drop(labels="team_key").to_dict())
         record["fixtures"] = [fixtures_by_team[team.squadra][day] for day in sorted(fixtures_by_team[team.squadra])]
         record["player_ids"] = [player["id"] for player in players if player["squadra"] == team.squadra]
+        understat_team_xg = 0.0
+        understat_count = 0
+        for player in players:
+            if player["squadra"] != team.squadra or not player.get("understat_current"):
+                continue
+            understat_team_xg += float(player["understat_current"].get("xG") or 0)
+            understat_count += 1
+        if understat_count:
+            record["understat_xg"] = round(understat_team_xg, 2)
+            record["understat_players"] = understat_count
         team_records.append(record)
     set_piece_records = []
     for team_name, group in pieces.dropna(subset=["id_matched"]).groupby("squadra"):
@@ -496,7 +563,24 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
             set_piece_records.append({"squadra": team_name, "team_id": normalize(team_name), "tipo": kind, "takers": sorted(takers, key=lambda item: item["priorita"])})
     league_rules = league_rules_payload(league)
     profile_meta = {"profile_id": profile.profile_id, "profile_name": profile.name, "profile_hash": profile.configuration_hash, "season": profile.season.season} if profile else None
-    payload = {"schema_version": "1.0", "model_version": "1.5", "players": players, "teams": team_records, "set_pieces": set_piece_records, "league_rules": league_rules, "calendario_serie_a": calendar_records, "calendario_lega": league_calendar, "meta": {"generato_il": datetime.now(timezone.utc).isoformat(), "versione_modello": "1.5", "profile": profile_meta, "assunzioni": "75 minuti per voto; disponibilita da status e storico; malus portieri incluso; lineup auto nel simulatore"}}
+    payload = {
+        "schema_version": "1.1",
+        "model_version": "1.6",
+        "players": players,
+        "teams": team_records,
+        "set_pieces": set_piece_records,
+        "league_rules": league_rules,
+        "calendario_serie_a": calendar_records,
+        "calendario_lega": league_calendar,
+        "meta": {
+            "generato_il": datetime.now(timezone.utc).isoformat(),
+            "versione_modello": "1.6",
+            "profile": profile_meta,
+            "understat_seasons": [str(season) for season in understat_seasons],
+            "understat_current_season": current_understat_season,
+            "assunzioni": "75 minuti per voto; disponibilita da status e storico; malus portieri incluso; lineup auto nel simulatore; understat informativo non in MC",
+        },
+    }
     with (output / "auction_data.json").open("w") as handle:
         json.dump(payload, handle, ensure_ascii=False, default=str, separators=(",", ":"), allow_nan=False)
     if web_export_dir is not None:

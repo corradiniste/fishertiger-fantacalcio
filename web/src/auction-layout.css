@@ -5,6 +5,9 @@
 .auction-history button { min-height: 42px; padding: 0 14px; border: 1px solid #55715e; border-radius: 8px; background: #263a2d; color: #f4faee; font-weight: 700; letter-spacing: .01em; box-shadow: 0 1px 0 #101712; transition: background .15s ease, border-color .15s ease, transform .15s ease; }
 .auction-history button:hover:not(:disabled) { background: #355541; border-color: #92b87f; transform: translateY(-1px); }
 .auction-history button:disabled { background: #202a23; border-color: #39473d; color: #9ba79d; opacity: 1; box-shadow: none; cursor: not-allowed; }
+.auction-history .export-xls { border-color: #6a8f5c; background: #2a4633; }
+.auction-history .export-xls:hover:not(:disabled) { background: #355c40; border-color: #a4d089; }
+.auction-history .export-xls[aria-busy="true"] { cursor: progress; }
 .auction-history .flush { border-color: #9c665a; background: #4a302b; }
 .auction-history .flush:hover { background: #653c33; border-color: #e0a18e; }
 .auction-owner { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 20px 0 -10px; color: #bce785; font-size: 12px; font-weight: 700; }

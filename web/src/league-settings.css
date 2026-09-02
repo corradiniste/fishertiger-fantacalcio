@@ -581,9 +581,57 @@
 }
 .ls-actions button:focus-visible,
 .ls-text-button:focus-visible,
-.ls-remove:focus-visible {
+.ls-remove:focus-visible,
+.ls-understat-sync:focus-visible {
   outline: 3px solid #cbff8b;
   outline-offset: 3px;
+}
+.ls-understat {
+  margin-top: 0;
+  padding: 16px;
+  border: 1px solid #3d5244;
+  border-radius: 10px;
+  background: #18221c;
+}
+.ls-understat-fieldset > legend span {
+  color: #bce785;
+}
+.ls-understat .ls-subheading {
+  margin-bottom: 8px;
+}
+.ls-understat .ls-source-group {
+  margin-top: 12px;
+}
+.ls-understat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+}
+.ls-understat-actions .ls-toggle {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.ls-understat-sync {
+  min-height: 42px;
+  border: 1px solid #6a925d;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: #263f2d;
+  color: #f4faee;
+  font-weight: 800;
+}
+.ls-understat-sync:hover:not(:disabled) {
+  background: #355541;
+}
+.ls-understat-sync:disabled {
+  opacity: 0.65;
+  cursor: wait;
 }
 @media (max-width: 700px) {
   .league-settings {

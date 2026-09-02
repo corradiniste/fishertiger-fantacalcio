@@ -98,17 +98,81 @@ export const generateProfile = async (profileOrId, options = {}) => {
   });
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Start an Understat scrape job. Returns the accepted job payload. */
+export const refreshUnderstatSources = async (
+  { seasons, force = false, autoGenerate = false, profileId: id, profile } = {},
+  options = {},
+) => {
+  if (!Array.isArray(seasons) || seasons.length === 0)
+    fail("invalid_seasons", "Provide at least one Understat season.");
+  const body = {
+    seasons: seasons.map(Number),
+    force: Boolean(force),
+    auto_generate: Boolean(autoGenerate),
+  };
+  if (profile) body.profile = object(profile);
+  else if (id) body.profile_id = profileId(id);
+  return requestJson(apiUrl("/api/sources/refresh", options.apiBase), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options.headers },
+    body: JSON.stringify(body),
+  });
+};
+
+export const understatRefreshStatus = async (jobId, options = {}) => {
+  const query = jobId ? `?job_id=${encodeURIComponent(jobId)}` : "";
+  return requestJson(apiUrl(`/api/sources/refresh/status${query}`, options.apiBase), options);
+};
+
+/** Lazy-load Understat radar / shots / matches for one fantacalcio player. */
+export const fetchPlayerUnderstat = async (
+  fantacalcioId,
+  { seasons, force = false, profileId: id, apiBase, ...options } = {},
+) => {
+  const numericId = Number(fantacalcioId);
+  if (!Number.isInteger(numericId) || numericId <= 0)
+    fail("invalid_player_id", "A positive fantacalcio player id is required.");
+  if (!id) fail("invalid_profile_id", "profileId is required for Understat player detail.");
+  const params = new URLSearchParams();
+  params.set("profile_id", profileId(id));
+  if (Array.isArray(seasons) && seasons.length)
+    params.set("seasons", seasons.map(Number).filter((value) => Number.isFinite(value)).join(","));
+  if (force) params.set("force", "1");
+  return requestJson(
+    apiUrl(`/api/players/${numericId}/understat?${params.toString()}`, apiBase),
+    options,
+  );
+};
+
+/** Poll until the refresh job completes or fails. */
+export const waitForUnderstatRefresh = async (jobId, options = {}) => {
+  if (!jobId) fail("invalid_job_id", "A refresh job id is required.");
+  const intervalMs = Math.max(250, Number(options.intervalMs) || 1200);
+  const timeoutMs = Math.max(intervalMs, Number(options.timeoutMs) || 180_000);
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const job = await understatRefreshStatus(jobId, options);
+    if (job.status === "completed" || job.status === "failed") return job;
+    await sleep(intervalMs);
+  }
+  fail("refresh_timeout", "Understat refresh timed out before completion.");
+};
+
 const datasetProfileId = (meta) => object(meta.profile).profile_id || meta.profile_id;
 
-/** Validate generated schema 1.0 data, while accepting pre-schema public exports. */
+/** Validate generated schema 1.0/1.1 data, while accepting pre-schema public exports. */
 export const validateDataset = (payload, profile) => {
   const errors = [];
   if (!isObject(payload)) errors.push({ code: "invalid_dataset", message: "Dataset must be a JSON object." });
   else {
-    if (payload.schema_version !== undefined && payload.schema_version !== "1.0")
-      errors.push({ code: "unsupported_dataset_schema", message: "Only dataset schema 1.0 is supported." });
-    if (payload.schema_version === "1.0" && !isObject(payload.meta))
-      errors.push({ code: "invalid_dataset_metadata", message: "Schema 1.0 datasets require metadata." });
+    const schema = payload.schema_version;
+    if (schema !== undefined && schema !== "1.0" && schema !== "1.1")
+      errors.push({ code: "unsupported_dataset_schema", message: "Only dataset schema 1.0 and 1.1 are supported." });
+    if ((schema === "1.0" || schema === "1.1") && !isObject(payload.meta))
+      errors.push({ code: "invalid_dataset_metadata", message: "Schema 1.0/1.1 datasets require metadata." });
     if (!Array.isArray(payload.players))
       errors.push({ code: "invalid_dataset_players", message: "Dataset players must be an array." });
     const expected = object(profile).profile_id;

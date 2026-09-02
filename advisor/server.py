@@ -9,12 +9,16 @@ import argparse
 import json
 import re
 import tempfile
+import threading
+import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .generate import (
     PipelineGenerator,
@@ -43,7 +47,7 @@ MAX_BODY_BYTES = 1_000_000
 MAX_UPLOAD_BYTES = 50_000_000
 PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
-SOURCE_GROUPS = {"current_sources", "history_sources"}
+SOURCE_GROUPS = {"current_sources", "history_sources", "understat_sources"}
 FIXED_SOURCE_SUFFIXES = {
     "current_sources": {
         "player_list": ".xlsx",
@@ -59,10 +63,28 @@ FIXED_SOURCE_SUFFIXES = {
         "stats_2024_25": ".xlsx",
         "stats_2023_24": ".xlsx",
     },
+    "understat_sources": {
+        "understat_2026": ".json",
+        "understat_2025": ".json",
+        "understat_2024": ".json",
+        "understat_2023": ".json",
+        "understat_2022": ".json",
+        "understat_2021": ".json",
+        "understat_2020": ".json",
+        "understat_2019": ".json",
+        "understat_2018": ".json",
+        "understat_2017": ".json",
+        "understat_2016": ".json",
+        "understat_2015": ".json",
+        "understat_2014": ".json",
+    },
 }
 VITE_ORIGIN = re.compile(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?\Z")
+PLAYER_UNDERSTAT_PATH = re.compile(r"/api/players/(\d+)/understat\Z")
 ProfileLoader = Callable[[dict[str, Any]], Any]
 SimulationRunner = Callable[[Any, Path, int, int], dict[str, Any]]
+UnderstatFetcher = Callable[..., list[Path]]
+UnderstatPlayerFetcher = Callable[..., dict[str, Any]]
 
 
 class LocalApiServer(ThreadingHTTPServer):
@@ -81,14 +103,20 @@ class LocalApiServer(ThreadingHTTPServer):
         profile_loader: ProfileLoader = load_profile,
         profile_store: ProfileStore | None = None,
         persistence: PersistenceBundle | None = None,
+        understat_fetcher: UnderstatFetcher | None = None,
+        understat_player_fetcher: UnderstatPlayerFetcher | None = None,
+        raw_dir: Path | str = Path("data/raw"),
     ) -> None:
         self.profiles_dir = Path(profiles_dir)
         self.datasets_dir = Path(datasets_dir)
         self.uploads_dir = Path(uploads_dir)
         self.default_profile_path = Path(default_profile_path)
+        self.raw_dir = Path(raw_dir)
         self.generator = generator
         self.simulator = simulator or _simulate_current_dataset
         self.profile_loader = profile_loader
+        self.understat_fetcher = understat_fetcher
+        self.understat_player_fetcher = understat_player_fetcher
         self.persistence = persistence or create_persistence(
             profiles_dir=self.profiles_dir,
             datasets_dir=self.datasets_dir,
@@ -97,6 +125,12 @@ class LocalApiServer(ThreadingHTTPServer):
         self.profile_store = profile_store or self.persistence.profiles
         self.dataset_store = self.persistence.datasets
         self.blob_store = self.persistence.blobs
+        self.refresh_jobs: dict[str, dict[str, Any]] = {}
+        self.refresh_lock = threading.Lock()
+        self.refresh_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="understat-refresh")
+        self.player_detail_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="understat-player")
+        self.player_detail_locks: dict[int, threading.Lock] = {}
+        self.player_detail_locks_guard = threading.Lock()
         super().__init__(address, LocalApiHandler)
 
 
@@ -108,6 +142,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self._path()
+        player_match = PLAYER_UNDERSTAT_PATH.fullmatch(path)
         if path == "/api/profiles":
             self._profile_index()
         elif path == "/api/default-profile":
@@ -118,6 +153,10 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._dataset_manifest()
         elif path.startswith("/api/datasets/"):
             self._get_dataset(path.removeprefix("/api/datasets/"))
+        elif path == "/api/sources/refresh/status":
+            self._refresh_status()
+        elif player_match:
+            self._player_understat(int(player_match.group(1)))
         else:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
@@ -131,13 +170,20 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
     def do_POST(self) -> None:
-        if self._path() == "/api/sources/status":
+        path = self._path()
+        if path == "/api/sources/status":
             self._source_status()
             return
-        if self._path() == "/api/simulate":
+        if path == "/api/sources/refresh":
+            self._refresh_sources()
+            return
+        if path == "/api/simulate":
             self._simulate()
             return
-        if self._path() != "/api/generate":
+        if path == "/api/auction/export":
+            self._auction_export()
+            return
+        if path != "/api/generate":
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
             return
         request = self._read_json_object()
@@ -173,6 +219,79 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         else:
             self._send_json(HTTPStatus.OK, result)
+
+    def _auction_export(self) -> None:
+        request = self._read_json_object()
+        if request is None:
+            return
+        profile_id = request.get("profile_id")
+        season = request.get("season")
+        teams = request.get("teams")
+        history = request.get("history")
+        if not isinstance(profile_id, str) or not PROFILE_NAME.fullmatch(profile_id):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile_id", "profile_id must be a safe profile name.")
+            return
+        if not isinstance(season, str) or not re.fullmatch(r"\d{4}-\d{2}", season):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_season", "season must use YYYY-ZZ format.")
+            return
+        if not isinstance(teams, list) or not teams:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_teams", "teams must be a non-empty array.")
+            return
+        if not isinstance(history, list):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_history", "history must be an array.")
+            return
+
+        relative = f"{profile_id}/{season}/auction_data.json"
+        output_dir = self.server.datasets_dir / profile_id / season
+        auction_path = output_dir / "auction_data.json"
+        try:
+            if not auction_path.is_file():
+                payload = self.server.dataset_store.get(relative)
+                if payload is not None:
+                    auction_path.parent.mkdir(parents=True, exist_ok=True)
+                    auction_path.write_text(
+                        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                        encoding="utf-8",
+                    )
+        except DataStoreError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json is unreadable.")
+            return
+        if not auction_path.is_file():
+            self._error(
+                HTTPStatus.CONFLICT,
+                "auction_data_missing",
+                "Genera i dati prima di esportare i colpi.",
+            )
+            return
+        try:
+            auction = json.loads(auction_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json is unreadable.")
+            return
+        if not isinstance(auction, dict):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json is invalid.")
+            return
+        players = auction.get("players")
+        if not isinstance(players, list):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json has no players list.")
+            return
+        rules = auction.get("league_rules") if isinstance(auction.get("league_rules"), dict) else {}
+        try:
+            from .auction_export import build_workbook
+
+            workbook = build_workbook(request, players, rules)
+        except ValueError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_export_payload", str(error))
+            return
+        except Exception:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "export_failed", "Could not build the auction export.")
+            return
+        self._send_bytes(
+            HTTPStatus.OK,
+            workbook,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=f"colpi_asta_{profile_id}.xlsx",
+        )
 
     def _simulate(self) -> None:
         request = self._read_json_object()
@@ -334,7 +453,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             pass
         statuses = []
         for group in SOURCE_GROUPS:
-            for source in getattr(profile, group):
+            for source in getattr(profile, group, ()):
                 declared = Path(source.path)
                 candidates = [declared] if declared.is_absolute() else [declared, Path.cwd() / declared, PROJECT_ROOT / declared]
                 existing_path = next((candidate for candidate in candidates if candidate.is_file()), None)
@@ -345,6 +464,279 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     "exists": existing_path is not None,
                 })
         self._send_json(HTTPStatus.OK, {"sources": statuses})
+
+    def _active_refresh_job(self) -> dict[str, Any] | None:
+        with self.server.refresh_lock:
+            for job in self.server.refresh_jobs.values():
+                if job.get("status") in {"queued", "running"}:
+                    return dict(job)
+        return None
+
+    def _refresh_status(self) -> None:
+        job_id = None
+        query = urlparse(self.path).query
+        for part in query.split("&"):
+            if part.startswith("job_id="):
+                job_id = unquote(part.removeprefix("job_id="))
+                break
+        with self.server.refresh_lock:
+            if job_id:
+                job = self.server.refresh_jobs.get(job_id)
+                if job is None:
+                    self._error(HTTPStatus.NOT_FOUND, "refresh_job_not_found", "No refresh job matches that id.")
+                    return
+                self._send_json(HTTPStatus.OK, dict(job))
+                return
+            active = None
+            for candidate in self.server.refresh_jobs.values():
+                if candidate.get("status") in {"queued", "running"}:
+                    active = dict(candidate)
+                    break
+            if active is None and self.server.refresh_jobs:
+                # Most recent completed job when nothing is active.
+                active = dict(max(self.server.refresh_jobs.values(), key=lambda item: item.get("updated_at", "")))
+            self._send_json(HTTPStatus.OK, active or {"status": "idle"})
+
+    def _refresh_sources(self) -> None:
+        request = self._read_json_object()
+        if request is None:
+            return
+        seasons_raw = request.get("seasons")
+        if not isinstance(seasons_raw, list) or not seasons_raw:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_seasons", "Provide a non-empty seasons array.")
+            return
+        try:
+            seasons = [int(value) for value in seasons_raw]
+        except (TypeError, ValueError):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_seasons", "Seasons must be integers.")
+            return
+        try:
+            from .understat import validate_seasons
+
+            seasons = validate_seasons(seasons, max_count=8)
+        except ValueError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_seasons", str(error))
+            return
+        auto_generate = bool(request.get("auto_generate", False))
+        force = bool(request.get("force", False))
+        profile = None
+        if auto_generate or request.get("profile_id") or "profile" in request:
+            try:
+                profile = resolve_profile(
+                    request,
+                    self.server.profiles_dir,
+                    profile_store=self.server.profile_store,
+                    profile_loader=self.server.profile_loader,
+                )
+            except ProfileRequestError as error:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
+                return
+        active = self._active_refresh_job()
+        if active is not None:
+            self._error(HTTPStatus.CONFLICT, "refresh_in_progress", "An Understat refresh job is already running.", details=active)
+            return
+        job_id = uuid.uuid4().hex
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "seasons": seasons,
+            "force": force,
+            "auto_generate": auto_generate,
+            "profile_id": getattr(profile, "profile_id", None),
+            "progress": [],
+            "paths": [],
+            "error": None,
+            "updated_at": _utc_now(),
+        }
+        with self.server.refresh_lock:
+            self.server.refresh_jobs[job_id] = job
+        self.server.refresh_executor.submit(self._run_refresh_job, job_id, seasons, force, auto_generate, profile)
+        self._send_json(HTTPStatus.ACCEPTED, dict(job))
+
+    def _run_refresh_job(
+        self,
+        job_id: str,
+        seasons: list[int],
+        force: bool,
+        auto_generate: bool,
+        profile: Any | None,
+    ) -> None:
+        def progress(event: dict[str, Any]) -> None:
+            with self.server.refresh_lock:
+                job = self.server.refresh_jobs[job_id]
+                job["progress"] = [*job.get("progress", []), event]
+                job["updated_at"] = _utc_now()
+
+        with self.server.refresh_lock:
+            self.server.refresh_jobs[job_id]["status"] = "running"
+            self.server.refresh_jobs[job_id]["updated_at"] = _utc_now()
+        try:
+            fetcher = self.server.understat_fetcher
+            if fetcher is None:
+                from .understat import fetch_seasons as fetcher
+            paths = fetcher(seasons, self.server.raw_dir, force=force, progress=progress)
+            result: dict[str, Any] = {"paths": [str(path) for path in paths]}
+            if auto_generate and profile is not None:
+                hydrate_profile_sources(profile, self.server.blob_store, project_root=PROJECT_ROOT)
+                generated = generate_dataset(profile, self.server.datasets_dir, generator=self.server.generator)
+                self._persist_season_outputs(profile)
+                result["generate"] = generated
+            with self.server.refresh_lock:
+                job = self.server.refresh_jobs[job_id]
+                job["status"] = "completed"
+                job["paths"] = result["paths"]
+                job["result"] = result
+                job["updated_at"] = _utc_now()
+        except Exception as error:
+            with self.server.refresh_lock:
+                job = self.server.refresh_jobs[job_id]
+                job["status"] = "failed"
+                job["error"] = str(error)
+                job["updated_at"] = _utc_now()
+
+    def _query_params(self) -> dict[str, list[str]]:
+        return parse_qs(urlparse(self.path).query, keep_blank_values=False)
+
+    def _player_lock(self, understat_id: int) -> threading.Lock:
+        with self.server.player_detail_locks_guard:
+            lock = self.server.player_detail_locks.get(understat_id)
+            if lock is None:
+                lock = threading.Lock()
+                self.server.player_detail_locks[understat_id] = lock
+            return lock
+
+    def _player_understat(self, fantacalcio_id: int) -> None:
+        params = self._query_params()
+        profile_id = (params.get("profile_id") or [None])[0]
+        force = (params.get("force") or ["0"])[0].lower() in {"1", "true", "yes"}
+        seasons_raw = (params.get("seasons") or [""])[0]
+
+        if not profile_id:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", "Query profile_id is required.")
+            return
+        try:
+            profile = resolve_profile(
+                {"profile_id": profile_id},
+                self.server.profiles_dir,
+                profile_store=self.server.profile_store,
+                profile_loader=self.server.profile_loader,
+            )
+        except ProfileRequestError as error:
+            message = str(error)
+            code = "profile_not_found" if "does not exist" in message else "invalid_profile"
+            status = HTTPStatus.NOT_FOUND if code == "profile_not_found" else HTTPStatus.BAD_REQUEST
+            self._error(status, code, message)
+            return
+
+        if seasons_raw.strip():
+            try:
+                seasons = [int(part.strip()) for part in seasons_raw.split(",") if part.strip()]
+            except ValueError:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_seasons", "Seasons must be integers.")
+                return
+        else:
+            try:
+                seasons = list(profile.understat_seasons())
+            except (TypeError, ValueError, AttributeError):
+                seasons = [
+                    int(str(source.season).split("-")[0].split("/")[0])
+                    for source in getattr(profile, "understat_sources", ())
+                    if getattr(source, "season", None) not in (None, "")
+                ]
+            if not seasons:
+                seasons = [int(str(profile.season.season).split("/", 1)[0])]
+        try:
+            from .understat import validate_seasons
+
+            seasons = validate_seasons(seasons, max_count=8)
+        except ValueError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_seasons", str(error))
+            return
+
+        output_dir = self.server.datasets_dir / profile.profile_id / profile.season.season.replace("/", "-")
+        try:
+            self._ensure_auction_dataset(output_dir, profile)
+        except Exception:
+            pass
+        auction_path = output_dir / "auction_data.json"
+        if not auction_path.is_file():
+            self._error(HTTPStatus.NOT_FOUND, "dataset_not_found", "auction_data.json is missing for this profile.")
+            return
+        try:
+            auction = json.loads(auction_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json is unreadable.")
+            return
+        players = auction.get("players") if isinstance(auction, dict) else None
+        if not isinstance(players, list):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json has no players list.")
+            return
+        player = None
+        for item in players:
+            if not isinstance(item, dict):
+                continue
+            try:
+                if int(item.get("id")) == fantacalcio_id:
+                    player = item
+                    break
+            except (TypeError, ValueError):
+                continue
+        if player is None:
+            self._error(HTTPStatus.NOT_FOUND, "player_not_found", "No player matches that fantacalcio id.")
+            return
+
+        from .understat_player import resolve_understat_id
+
+        understat_id = resolve_understat_id(player)
+        if understat_id is None:
+            self._error(
+                HTTPStatus.NOT_FOUND,
+                "no_understat_id",
+                "This player has no matched Understat id.",
+            )
+            return
+
+        fetcher = self.server.understat_player_fetcher
+        if fetcher is None:
+            from .understat_player import PLAYER_CACHE_DIR, fetch_player_detail as fetcher
+
+            cache_dir = PLAYER_CACHE_DIR
+        else:
+            cache_dir = self.server.raw_dir / "understat_players"
+
+        lock = self._player_lock(understat_id)
+
+        def run() -> dict[str, Any]:
+            with lock:
+                return fetcher(
+                    understat_id,
+                    seasons,
+                    cache_dir=cache_dir,
+                    force=force,
+                )
+
+        future = self.server.player_detail_executor.submit(run)
+        try:
+            detail = future.result(timeout=60)
+        except TimeoutError:
+            self._error(HTTPStatus.GATEWAY_TIMEOUT, "understat_timeout", "Understat player detail timed out.")
+            return
+        except Exception as error:
+            self._error(HTTPStatus.BAD_GATEWAY, "understat_fetch_failed", str(error) or "Understat fetch failed.")
+            return
+
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "fantacalcio_id": fantacalcio_id,
+                "understat_id": understat_id,
+                "radar": detail.get("radar"),
+                "shots": detail.get("shots") or {},
+                "matches": detail.get("matches") or [],
+                "fetched_at": detail.get("fetched_at"),
+                "cached_at": detail.get("cached_at"),
+            },
+        )
 
     def _derive_calendar_participants(self, profile: Any) -> Any:
         """Use the league calendar as the authoritative participant roster when available."""
@@ -490,19 +882,44 @@ class LocalApiHandler(BaseHTTPRequestHandler):
     def _path(self) -> str:
         return unquote(urlparse(self.path).path)
 
-    def _error(self, status: HTTPStatus, code: str, message: str) -> None:
-        self._send_json(status, {"error": {"code": code, "message": message}})
+    def _error(self, status: HTTPStatus, code: str, message: str, *, details: Any | None = None) -> None:
+        error: dict[str, Any] = {"code": code, "message": message}
+        if details is not None:
+            error["details"] = details
+        self._send_json(status, {"error": error})
 
-    def _send_json(self, status: HTTPStatus, value: Any) -> None:
-        body = b"" if value is None else json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        self.send_response(status)
+    def _cors_headers(self) -> None:
         origin = self.headers.get("Origin")
         if origin and VITE_ORIGIN.fullmatch(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Filename")
+
+    def _send_json(self, status: HTTPStatus, value: Any) -> None:
+        body = b"" if value is None else json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        self.send_response(status)
+        self._cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def _send_bytes(
+        self,
+        status: HTTPStatus,
+        body: bytes,
+        *,
+        content_type: str,
+        filename: str | None = None,
+    ) -> None:
+        self.send_response(status)
+        self._cors_headers()
+        self.send_header("Content-Type", content_type)
+        if filename:
+            safe_name = re.sub(r'["\\\r\n]', "_", filename)
+            self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if body:
@@ -524,6 +941,9 @@ def create_server(
     profile_loader: ProfileLoader = load_profile,
     profile_store: ProfileStore | None = None,
     persistence: PersistenceBundle | None = None,
+    understat_fetcher: UnderstatFetcher | None = None,
+    understat_player_fetcher: UnderstatPlayerFetcher | None = None,
+    raw_dir: Path | str = Path("data/raw"),
 ) -> LocalApiServer:
     """Create a local API server; inject a pipeline generator for tests or embedding."""
     return LocalApiServer(
@@ -537,7 +957,14 @@ def create_server(
         profile_loader=profile_loader,
         profile_store=profile_store,
         persistence=persistence,
+        understat_fetcher=understat_fetcher,
+        understat_player_fetcher=understat_player_fetcher,
+        raw_dir=raw_dir,
     )
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _simulate_current_dataset(profile: Any, output_dir: Path, iterations: int, seed: int) -> dict[str, Any]:
