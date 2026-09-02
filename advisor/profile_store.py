@@ -17,7 +17,7 @@ class ProfileStoreError(OSError):
 
 
 class ProfileStore(Protocol):
-    """Minimal list/get/put interface used by the local HTTP API."""
+    """Minimal list/get/put/delete interface used by the local HTTP API."""
 
     def list_ids(self) -> list[str]:
         """Return sorted saved profile identifiers."""
@@ -27,6 +27,9 @@ class ProfileStore(Protocol):
 
     def put(self, profile_id: str, payload: dict[str, Any]) -> None:
         """Persist a validated profile payload under profile_id."""
+
+    def delete(self, profile_id: str) -> bool:
+        """Remove a profile. Return True when something was deleted."""
 
 
 class LocalProfileStore:
@@ -78,6 +81,16 @@ class LocalProfileStore:
             temporary_path.replace(path)
         except (OSError, TypeError, ValueError) as error:
             raise ProfileStoreError("The profile could not be saved.") from error
+
+    def delete(self, profile_id: str) -> bool:
+        path = self._path(profile_id)
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise ProfileStoreError("The profile could not be deleted.") from error
 
     def _path(self, profile_id: str) -> Path:
         if not PROFILE_ID.fullmatch(profile_id):
@@ -149,6 +162,19 @@ class SupabaseProfileStore:
             raise ProfileStoreError("The profile could not be saved.") from error
         except Exception as error:
             raise ProfileStoreError("The profile could not be saved.") from error
+
+    def delete(self, profile_id: str) -> bool:
+        if not PROFILE_ID.fullmatch(profile_id):
+            raise ValueError("invalid profile id")
+        try:
+            with self._connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM public.profiles WHERE id = %s", (profile_id,))
+                    deleted = cursor.rowcount > 0
+                connection.commit()
+        except Exception as error:
+            raise ProfileStoreError("The profile could not be deleted.") from error
+        return deleted
 
     def _connect(self) -> Any:
         import psycopg

@@ -3,6 +3,7 @@ import {
   applyRulesStartingCredits,
   auctionStorageKey,
   legalMaxBid,
+  mergeAuctionPlayers,
   playerIdKey,
   rehydrateAuction,
   slotsLeft,
@@ -229,7 +230,8 @@ export function LiveBoard({ profileId }) {
           hydrated.history?.length
         ) {
           const last = hydrated.history.at(-1);
-          const player = players.find(
+          const pool = mergeAuctionPlayers(players, hydrated.customPlayers);
+          const player = pool.find(
             (item) => playerIdKey(item.id) === playerIdKey(last.playerId),
           );
           if (player) {
@@ -261,10 +263,10 @@ export function LiveBoard({ profileId }) {
     return () => window.clearInterval(id);
   }, []);
 
-  const playersById = useMemo(
-    () => new Map(players.map((player) => [playerIdKey(player.id), player])),
-    [players],
-  );
+  const playersById = useMemo(() => {
+    const pool = mergeAuctionPlayers(players, liveState?.customPlayers);
+    return new Map(pool.map((player) => [playerIdKey(player.id), player]));
+  }, [players, liveState?.customPlayers]);
 
   const lotPlayer = liveState?.lot?.playerId != null
     ? playersById.get(playerIdKey(liveState.lot.playerId))

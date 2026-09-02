@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import tempfile
 import threading
 import uuid
@@ -159,6 +160,13 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         else:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
+    def do_DELETE(self) -> None:
+        path = self._path()
+        if path.startswith("/api/profiles/"):
+            self._delete_profile(path.removeprefix("/api/profiles/"))
+        else:
+            self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
+
     def do_POST(self) -> None:
         path = self._path()
         if path == "/api/sources/status":
@@ -265,6 +273,24 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         if not isinstance(players, list):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json has no players list.")
             return
+        custom_players = request.get("custom_players")
+        if isinstance(custom_players, list) and custom_players:
+            merged = {str(player.get("id")): player for player in players if isinstance(player, dict)}
+            for item in custom_players:
+                if not isinstance(item, dict) or item.get("id") is None:
+                    continue
+                nome = str(item.get("nome") or "").strip()
+                ruolo = str(item.get("ruolo") or "").strip().upper()
+                squadra = str(item.get("squadra") or "").strip()
+                if not nome or ruolo not in {"P", "D", "C", "A"} or not squadra:
+                    continue
+                merged[str(item["id"])] = {
+                    "id": item["id"],
+                    "nome": nome,
+                    "ruolo": ruolo,
+                    "squadra": squadra,
+                }
+            players = list(merged.values())
         rules = auction.get("league_rules") if isinstance(auction.get("league_rules"), dict) else {}
         try:
             from .auction_export import build_workbook
@@ -387,6 +413,55 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The profile could not be saved.")
             return
         self._send_json(HTTPStatus.OK, profile.to_dict())
+
+    def _delete_profile(self, name: str) -> None:
+        if not self._valid_profile_name(name):
+            return
+        try:
+            existing = self.server.profile_store.get(name)
+        except ProfileStoreError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The stored profile is invalid or unreadable.")
+            return
+        if existing is None:
+            self._error(HTTPStatus.NOT_FOUND, "profile_not_found", "The profile does not exist.")
+            return
+        try:
+            deleted = self.server.profile_store.delete(name)
+        except ProfileStoreError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The profile could not be deleted.")
+            return
+        if not deleted:
+            self._error(HTTPStatus.NOT_FOUND, "profile_not_found", "The profile does not exist.")
+            return
+
+        datasets_removed = 0
+        uploads_removed = 0
+        try:
+            datasets_removed = self.server.dataset_store.delete_prefix(name)
+        except (DataStoreError, ValueError, OSError):
+            datasets_removed = 0
+        try:
+            uploads_removed = self.server.blob_store.delete_prefix(f"uploads/{name}")
+        except (DataStoreError, ValueError, OSError):
+            uploads_removed = 0
+        # Local upload tree may live under uploads_dir even when blob_store is broader.
+        try:
+            upload_root = self.server.uploads_dir / name
+            if upload_root.exists():
+                count = sum(1 for path in upload_root.rglob("*") if path.is_file())
+                shutil.rmtree(upload_root, ignore_errors=True)
+                uploads_removed = max(uploads_removed, count)
+        except OSError:
+            pass
+
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "deleted": name,
+                "datasets_removed": datasets_removed,
+                "uploads_removed": uploads_removed,
+            },
+        )
 
     def _put_upload(self, relative_path: str) -> None:
         parts = relative_path.split("/")

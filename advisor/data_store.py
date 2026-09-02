@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,6 +56,9 @@ class DatasetStore(Protocol):
     def put(self, path: str, payload: dict[str, Any]) -> None:
         """Upsert a JSON dataset payload."""
 
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete all datasets under prefix. Return deleted file/row count."""
+
     def manifest(self) -> dict[str, list[dict[str, Any]]]:
         """Return API-shaped dataset manifest metadata."""
 
@@ -68,6 +72,9 @@ class BlobStore(Protocol):
 
     def put(self, path: str, content: bytes, *, content_type: str | None = None) -> None:
         """Upsert binary content."""
+
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete all blobs under prefix. Return deleted file/row count."""
 
 
 class LocalDatasetStore:
@@ -114,6 +121,21 @@ class LocalDatasetStore:
             temporary.replace(target)
         except (OSError, TypeError, ValueError) as error:
             raise DataStoreError("The dataset could not be saved.") from error
+
+    def delete_prefix(self, prefix: str) -> int:
+        relative = assert_safe_path(prefix.strip("/"))
+        root = self.datasets_dir.resolve()
+        target = (root / relative).resolve()
+        if target == root or not target.is_relative_to(root):
+            raise ValueError("Dataset prefix must stay within dataset storage.")
+        if not target.exists():
+            return 0
+        if target.is_file():
+            target.unlink()
+            return 1
+        count = sum(1 for path in target.rglob("*") if path.is_file())
+        shutil.rmtree(target)
+        return count
 
     def manifest(self) -> dict[str, list[dict[str, Any]]]:
         root = self.datasets_dir
@@ -205,6 +227,21 @@ class SupabaseDatasetStore:
         except Exception as error:
             raise DataStoreError("The dataset could not be saved.") from error
 
+    def delete_prefix(self, prefix: str) -> int:
+        relative = assert_safe_path(prefix.strip("/"))
+        try:
+            with self._connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM public.datasets WHERE path = %s OR path LIKE %s",
+                        (relative, f"{relative}/%"),
+                    )
+                    deleted = int(cursor.rowcount or 0)
+                connection.commit()
+        except Exception as error:
+            raise DataStoreError("The dataset could not be deleted.") from error
+        return deleted
+
     def manifest(self) -> dict[str, list[dict[str, Any]]]:
         try:
             with self._connect() as connection:
@@ -286,6 +323,21 @@ class LocalBlobStore:
         except OSError as error:
             raise DataStoreError("The file could not be saved.") from error
 
+    def delete_prefix(self, prefix: str) -> int:
+        relative = assert_safe_path(prefix.strip("/"))
+        root = self.root_dir.resolve()
+        target = (root / relative).resolve()
+        if target == root or not target.is_relative_to(root):
+            raise ValueError("Blob prefix must stay within blob storage.")
+        if not target.exists():
+            return 0
+        if target.is_file():
+            target.unlink()
+            return 1
+        count = sum(1 for path in target.rglob("*") if path.is_file())
+        shutil.rmtree(target)
+        return count
+
     def _resolve(self, path: str) -> Path:
         relative = assert_safe_path(path)
         root = self.root_dir.resolve()
@@ -359,6 +411,21 @@ class SupabaseBlobStore:
                 connection.commit()
         except Exception as error:
             raise DataStoreError("The file could not be saved.") from error
+
+    def delete_prefix(self, prefix: str) -> int:
+        relative = assert_safe_path(prefix.strip("/"))
+        try:
+            with self._connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM public.blobs WHERE path = %s OR path LIKE %s",
+                        (relative, f"{relative}/%"),
+                    )
+                    deleted = int(cursor.rowcount or 0)
+                connection.commit()
+        except Exception as error:
+            raise DataStoreError("The file could not be deleted.") from error
+        return deleted
 
     def _connect(self) -> Any:
         import psycopg

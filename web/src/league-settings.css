@@ -579,6 +579,48 @@
   transform: translateY(-2px);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
 }
+.ls-danger {
+  margin: 28px 0 8px;
+  padding: 18px 16px;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: #2a1c1a;
+}
+.ls-danger .ls-subheading h3 {
+  color: #f1b7a8;
+}
+.ls-danger .ls-field {
+  max-width: 420px;
+  margin-top: 12px;
+}
+.ls-danger code {
+  color: #f7fff1;
+}
+.ls-delete {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-top: 12px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 10px 16px;
+  background: #402923;
+  color: #f7d7cf;
+  font: inherit;
+  font-weight: 900;
+  cursor: pointer;
+}
+.ls-delete:hover:not(:disabled) {
+  background: #5a322a;
+}
+.ls-delete:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.ls-delete:focus-visible {
+  outline: 3px solid #d38372;
+  outline-offset: 2px;
+}
 .ls-actions button:focus-visible,
 .ls-text-button:focus-visible,
 .ls-remove:focus-visible,

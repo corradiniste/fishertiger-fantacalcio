@@ -30,6 +30,12 @@ export const buildExportPayload = (state, { profileId, season, roleBudgetPercent
       price: item.price,
     })),
     ...(budgets ? { role_budget_percentages: budgets } : {}),
+    custom_players: (serialized.customPlayers || []).map((player) => ({
+      id: player.id,
+      nome: player.nome,
+      ruolo: player.ruolo,
+      squadra: player.squadra,
+    })),
   };
 };
 

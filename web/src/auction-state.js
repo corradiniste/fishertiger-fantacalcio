@@ -49,7 +49,118 @@ export const emptyAuction = (rules) => ({
   nominator: 0,
   bids: [],
   lot: null,
+  customPlayers: [],
 });
+
+const CUSTOM_ROLES = new Set(["P", "D", "C", "A"]);
+
+/** Merge dataset players with auction-created customs (customs win on id clash). */
+export const mergeAuctionPlayers = (datasetPlayers = [], customPlayers = []) => {
+  const byId = new Map();
+  for (const player of datasetPlayers || []) {
+    if (player?.id == null) continue;
+    byId.set(playerIdKey(player.id), player);
+  }
+  for (const player of customPlayers || []) {
+    if (player?.id == null) continue;
+    byId.set(playerIdKey(player.id), player);
+  }
+  return [...byId.values()];
+};
+
+const nextCustomPlayerId = (existingPlayers = []) => {
+  let minId = 0;
+  for (const player of existingPlayers) {
+    const value = Number(player?.id);
+    if (Number.isInteger(value) && value < minId) minId = value;
+  }
+  return minId - 1;
+};
+
+/**
+ * Build a minimal auction player created during live bidding.
+ * Uses negative integer ids to avoid Fantacalcio id collisions.
+ */
+export const createCustomPlayer = (
+  { nome, ruolo, squadra },
+  existingPlayers = [],
+) => {
+  const name = String(nome ?? "").trim();
+  const role = String(ruolo ?? "").trim().toUpperCase();
+  const club = String(squadra ?? "").trim();
+  if (!name || !CUSTOM_ROLES.has(role) || !club) return null;
+  const duplicate = existingPlayers.some(
+    (player) =>
+      String(player?.nome || "").trim().toLowerCase() === name.toLowerCase() &&
+      String(player?.ruolo || "").toUpperCase() === role &&
+      String(player?.squadra || "").trim().toLowerCase() === club.toLowerCase(),
+  );
+  if (duplicate) return null;
+  return {
+    id: nextCustomPlayerId(existingPlayers),
+    nome: name,
+    ruolo: role,
+    squadra: club,
+    custom: true,
+    fvm_scaled: 0,
+    fvm_original: 0,
+    guida_asta_fascia: null,
+    ruoli_mantra: role,
+    disponibilita: {
+      status: "CUSTOM",
+      nota: "Creato manualmente in asta",
+    },
+    proiezione: {
+      p_gioca: 0,
+      voto_puro: 0,
+      deviazione: 0,
+      bonus: 0,
+      fantavoto: 0,
+    },
+    understat: {},
+    understat_current: null,
+    storico: {},
+  };
+};
+
+const parseCustomPlayer = (item) => {
+  if (!item || typeof item !== "object" || item.id == null) return null;
+  const nome = String(item.nome ?? "").trim();
+  const ruolo = String(item.ruolo ?? "").trim().toUpperCase();
+  const squadra = String(item.squadra ?? "").trim();
+  if (!nome || !CUSTOM_ROLES.has(ruolo) || !squadra) return null;
+  const id =
+    typeof item.id === "number" && Number.isInteger(item.id)
+      ? item.id
+      : Number.isInteger(Number(item.id))
+        ? Number(item.id)
+        : item.id;
+  return {
+    id,
+    nome,
+    ruolo,
+    squadra,
+    custom: true,
+    fvm_scaled: 0,
+    fvm_original: 0,
+    guida_asta_fascia: null,
+    ruoli_mantra: ruolo,
+    disponibilita: {
+      status: "CUSTOM",
+      nota: "Creato manualmente in asta",
+    },
+    proiezione: {
+      p_gioca: 0,
+      voto_puro: 0,
+      deviazione: 0,
+      bonus: 0,
+      fantavoto: 0,
+    },
+    understat: {},
+    understat_current: null,
+    storico: {},
+  };
+};
 
 export const slotsLeft = (team, rules) =>
   Object.fromEntries(
@@ -223,7 +334,6 @@ export const rehydrateAuction = (saved, players, rules) => {
   const rawHistory = Array.isArray(saved.history) ? saved.history : null;
   const rawUndone = Array.isArray(saved.undone) ? saved.undone : [];
   if (!rawTeams || rawTeams.length !== rules.participants || !rawHistory) return null;
-  const playersById = new Map((players || []).map((player) => [playerIdKey(player.id), player]));
   const transactions = rawHistory.map(transactionFrom);
   const undone = rawUndone.map(transactionFrom);
   if (transactions.some((item) => !item) || undone.some((item) => !item)) return null;
@@ -237,7 +347,14 @@ export const rehydrateAuction = (saved, players, rules) => {
       : null;
   });
   if (teams.some((team) => !team)) return null;
-  const state = replayHistory(transactions, players, rules, teams);
+  const customPlayers = Array.isArray(saved.customPlayers)
+    ? saved.customPlayers.map(parseCustomPlayer).filter(Boolean)
+    : [];
+  const playerPool = mergeAuctionPlayers(players, customPlayers);
+  const playersById = new Map(
+    playerPool.map((player) => [playerIdKey(player.id), player]),
+  );
+  const state = replayHistory(transactions, playerPool, rules, teams);
   if (!state) return null;
   const redoState = {
     ...state,
@@ -261,6 +378,7 @@ export const rehydrateAuction = (saved, players, rules) => {
     redoState.assigned[playerIdKey(item.playerId)] = { owner: item.owner, price: item.price };
   }
   state.undone = undone.map((item) => ({ ...item, playerId: playersById.get(playerIdKey(item.playerId)).id }));
+  state.customPlayers = customPlayers;
   const bids = Array.isArray(saved.bids)
     ? saved.bids.map(parseBid).filter(Boolean).filter((bid) => bid.team < state.teams.length)
     : [];
@@ -278,4 +396,10 @@ export const serializeAuction = (state) => ({
   nominator: clampNominator(state.nominator, state.teams.length),
   bids: (state.bids || []).map(({ team, price, ts }) => ({ t: team, p: price, ts })),
   lot: state.lot?.playerId != null ? { playerId: state.lot.playerId } : null,
+  customPlayers: (state.customPlayers || []).map(({ id, nome, ruolo, squadra }) => ({
+    id,
+    nome,
+    ruolo,
+    squadra,
+  })),
 });

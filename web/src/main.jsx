@@ -12,9 +12,11 @@ import {
   auctionStorageKey,
   clearBids,
   clearLot,
+  createCustomPlayer,
   emptyAuction,
   isValidBid,
   legalMaxBid,
+  mergeAuctionPlayers,
   playerIdKey,
   rehydrateAuction,
   replayHistory,
@@ -35,6 +37,7 @@ import {
   listProfiles,
   loadDatasetUrl,
   loadProfile,
+  deleteProfile,
   refreshUnderstatSources,
   rulesFor,
   saveProfile,
@@ -364,6 +367,35 @@ function App() {
       throw error;
     }
   };
+  const removeProfile = async (profileIdToDelete) => {
+    setProfileError("");
+    const payload = await deleteProfile(profileIdToDelete, { apiBase });
+    try {
+      localStorage.removeItem(auctionStorageKey(profileIdToDelete));
+      if (localStorage.getItem(ACTIVE_PROFILE_KEY) === profileIdToDelete) {
+        localStorage.removeItem(ACTIVE_PROFILE_KEY);
+      }
+    } catch {
+      /* ignore quota / private mode */
+    }
+    const entries = await refreshProfileCatalog();
+    const remaining = entries.filter((entry) => entry.id !== profileIdToDelete);
+    if (remaining.length) {
+      await selectSavedProfile(remaining[0].id);
+      navigate("overview");
+    } else {
+      setProfile(null);
+      setData(null);
+      setSeason(null);
+      setSelectedPlayer(null);
+      setSuggestedProfileId("");
+      setBootPhase("pick");
+      setView("overview");
+      setViewHistory([{ view: "overview", player: null, team: null }]);
+      setHistoryIndex(0);
+    }
+    return payload;
+  };
   const regenerateData = async () => {
     if (!profile || isGenerating) return;
     setIsGenerating(true);
@@ -478,6 +510,7 @@ function App() {
             apiBase={apiBase}
             onSave={(nextProfile) => updateProfile(nextProfile)}
             onGenerate={(nextProfile) => updateProfile(nextProfile, true)}
+            onDelete={removeProfile}
           />
           {profileError && <p className="profile-error" role="alert">{profileError}</p>}
         </section>
@@ -621,6 +654,7 @@ function App() {
             apiBase={apiBase}
             onSave={(nextProfile) => updateProfile(nextProfile)}
             onGenerate={(nextProfile) => updateProfile(nextProfile, true)}
+            onDelete={removeProfile}
           />
           {profileError && (
             <p className="profile-error" role="alert">
@@ -1646,8 +1680,17 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
   const worker = useRef();
   const skipPersist = useRef(false);
   const liveChannelRef = useRef(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const [customRole, setCustomRole] = useState("A");
+  const [customClub, setCustomClub] = useState("");
+  const playersPool = mergeAuctionPlayers(data.players, state.customPlayers);
+  const clubOptions = (data.teams || [])
+    .map((team) => team.squadra)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, "it"));
   const workerHistory = state.history.flatMap((transaction) => {
-    const transactionPlayer = data.players.find(
+    const transactionPlayer = playersPool.find(
       (candidate) =>
         playerIdKey(candidate.id) === playerIdKey(transaction.playerId),
     );
@@ -1711,7 +1754,7 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
       owner: userTeamIndex,
       mine: state.teams[userTeamIndex],
       teams: state.teams,
-      remaining: data.players.filter((p) => !state.assigned[playerIdKey(p.id)]),
+      remaining: playersPool.filter((p) => !state.assigned[playerIdKey(p.id)]),
       assigned: state.assigned,
       history: workerHistory,
       rules: activeRules,
@@ -1723,14 +1766,14 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
       owner: userTeamIndex,
       mine: state.teams[userTeamIndex],
       teams: state.teams,
-      remaining: data.players.filter((p) => !state.assigned[playerIdKey(p.id)]),
+      remaining: playersPool.filter((p) => !state.assigned[playerIdKey(p.id)]),
       assigned: state.assigned,
       history: workerHistory,
       rules: activeRules,
     });
   }, [state, data, rulesSignature, userTeamIndex]);
   const activeRole = activeNominationRole(state.teams, activeRules);
-  const choices = data.players
+  const choices = playersPool
     .filter(
       (p) =>
         !state.assigned[playerIdKey(p.id)] &&
@@ -1854,7 +1897,7 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
       );
     });
     setMessage(
-      `Annullata l'assegnazione di ${data.players.find((p) => playerIdKey(p.id) === playerIdKey(last.playerId))?.nome || "giocatore"}.`,
+      `Annullata l'assegnazione di ${playersPool.find((p) => playerIdKey(p.id) === playerIdKey(last.playerId))?.nome || "giocatore"}.`,
     );
     setMessageType("info");
   };
@@ -1862,7 +1905,7 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
     const last = state.undone?.at(-1);
     if (!last) return;
     const team = state.teams[last.owner];
-    const restoredPlayer = data.players.find(
+    const restoredPlayer = playersPool.find(
       (p) => playerIdKey(p.id) === playerIdKey(last.playerId),
     );
     if (
@@ -1898,7 +1941,7 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
     setMessageType("success");
   };
   const applyHistory = (next) => {
-    const rebuilt = replayHistory(next, data.players, activeRules, state.teams);
+    const rebuilt = replayHistory(next, playersPool, activeRules, state.teams);
     if (!rebuilt) {
       setMessage("Modifica non valida: budget o slot insufficienti.");
       setMessageType("error");
@@ -1909,6 +1952,7 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
       teams: rebuilt.teams,
       assigned: rebuilt.assigned,
       history: rebuilt.history,
+      customPlayers: current.customPlayers || [],
       undone: [],
     }));
     return true;
@@ -1998,7 +2042,7 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
   const replayLastCelebration = () => {
     const last = state.history.at(-1);
     if (!last) return;
-    const sold = data.players.find(
+    const sold = playersPool.find(
       (candidate) => playerIdKey(candidate.id) === playerIdKey(last.playerId),
     );
     if (!sold) {
@@ -2030,6 +2074,30 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
           : team,
       ),
     }));
+  };
+  const submitCustomPlayer = (event) => {
+    event?.preventDefault?.();
+    const created = createCustomPlayer(
+      { nome: customName, ruolo: customRole, squadra: customClub },
+      playersPool,
+    );
+    if (!created) {
+      setMessage(
+        "Nome, ruolo e squadra obbligatori. Controlla che non esista gia lo stesso giocatore.",
+      );
+      setMessageType("error");
+      return;
+    }
+    setState((current) => ({
+      ...current,
+      customPlayers: [...(current.customPlayers || []), created],
+    }));
+    selectPlayer(created);
+    setCreateOpen(false);
+    setCustomName("");
+    setCustomClub(clubOptions[0] || "");
+    setMessage(`Creato ${created.nome} (${created.ruolo} · ${created.squadra}).`);
+    setMessageType("success");
   };
   return (
     <section className="data-view auction">
@@ -2086,7 +2154,7 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
           <span>Ultima azione</span>
           <strong>
             {state.history.length
-              ? data.players.find(
+              ? playersPool.find(
                   (p) =>
                     playerIdKey(p.id) ===
                     playerIdKey(state.history.at(-1).playerId),
@@ -2136,6 +2204,19 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
             autoComplete="off"
             aria-describedby="auction-results"
           />
+          <button
+            type="button"
+            className="auction-create-link"
+            onClick={() => {
+              setCreateOpen(true);
+              setCustomName(query.trim());
+              setCustomRole(activeRole || "A");
+              setCustomClub(clubOptions[0] || "");
+              setSuggestionsOpen(false);
+            }}
+          >
+            Crea giocatore (non in lista)
+          </button>
           {suggestionsOpen && query.length >= 2 && (
             <div className="auction-results" id="auction-results">
               <span>
@@ -2150,13 +2231,80 @@ function Auction({ data, rules, profileId, apiBase = "" }) {
                   aria-label={`Seleziona ${p.nome}, ${p.ruolo}, ${p.squadra}`}
                 >
                   <i className={"role " + p.ruolo}>{p.ruolo}</i>
-                  <b>{p.nome}</b>
+                  <b>
+                    {p.nome}
+                    {p.custom ? " · custom" : ""}
+                  </b>
                   <small>
-                    {p.squadra} · {p.fvm_scaled}
+                    {p.squadra} · {p.custom ? "manuale" : p.fvm_scaled}
                   </small>
                 </button>
               ))}
+              <button
+                type="button"
+                className="auction-create-trigger"
+                onClick={() => {
+                  setCreateOpen(true);
+                  setCustomName(query.trim());
+                  setCustomRole(activeRole || "A");
+                  setCustomClub(clubOptions[0] || "");
+                  setSuggestionsOpen(false);
+                }}
+              >
+                Crea giocatore…
+              </button>
             </div>
+          )}
+          {createOpen && (
+            <form className="auction-create" onSubmit={submitCustomPlayer}>
+              <div className="auction-create-head">
+                <strong>Nuovo giocatore</strong>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setCreateOpen(false)}
+                >
+                  Chiudi
+                </button>
+              </div>
+              <label htmlFor="custom-player-name">Nome</label>
+              <input
+                id="custom-player-name"
+                value={customName}
+                onChange={(e) => setCustomName(e.target.value)}
+                placeholder="Cognome Nome"
+                autoComplete="off"
+                required
+              />
+              <label htmlFor="custom-player-role">Ruolo</label>
+              <select
+                id="custom-player-role"
+                value={customRole}
+                onChange={(e) => setCustomRole(e.target.value)}
+              >
+                {Object.keys(ROLE_LABELS).map((role) => (
+                  <option key={role} value={role}>
+                    {role} · {ROLE_LABELS[role]}
+                  </option>
+                ))}
+              </select>
+              <label htmlFor="custom-player-club">Squadra</label>
+              <input
+                id="custom-player-club"
+                list="custom-player-clubs"
+                value={customClub}
+                onChange={(e) => setCustomClub(e.target.value)}
+                placeholder="Es. Inter"
+                autoComplete="off"
+                required
+              />
+              <datalist id="custom-player-clubs">
+                {clubOptions.map((club) => (
+                  <option key={club} value={club} />
+                ))}
+              </datalist>
+              <button type="submit">Crea e seleziona</button>
+            </form>
           )}
         </div>
         <div className="auction-history">

@@ -12,6 +12,19 @@
 .auction-teams .bid-delete:hover{background:#402923;border-color:#d38372}
 .auction-teams .bid-delete:focus-visible{outline:2px solid #d38372;outline-offset:1px}
 
+.auction-create-link{display:inline-block;margin-top:8px;padding:0;border:0;background:transparent;color:#bce785;font-size:12px;font-weight:700;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.auction-create-link:hover{color:#d7f0c8}
+.auction-create-trigger{display:block;width:100%;margin-top:4px;padding:10px;border:0;border-top:1px solid #405046;background:#1a241c;color:#bce785;font-weight:700;cursor:pointer;text-align:left}
+.auction-create-trigger:hover{background:#223026}
+.auction-create{margin-top:10px;padding:12px;border:1px solid #405046;border-radius:9px;background:#141c16;display:grid;gap:6px}
+.auction-create-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
+.auction-create-head strong{color:#f7fff1;font-size:14px}
+.auction-create-head .ghost{border:0;background:transparent;color:#afbcaf;cursor:pointer;font-size:12px}
+.auction-create label{color:#bce785;font-size:12px;font-weight:700}
+.auction-create input,.auction-create select{width:100%;margin:0;min-height:38px;border:1px solid #526258;border-radius:6px;background:#101712;color:#f7fff1;padding:0 10px}
+.auction-create button[type=submit]{margin-top:6px;min-height:40px;border:1px solid #6fae69;border-radius:6px;background:#1f3523;color:#d7f0c8;font-weight:750;cursor:pointer}
+.auction-create button[type=submit]:hover{filter:brightness(1.08)}
+
 .auction-teams article a.bid-player{display:flex;width:100%;gap:5px;align-items:center;background:transparent;border:0;padding:3px 0;text-align:left;font-size:12px;color:inherit;text-decoration:none;cursor:pointer}
 .auction-teams article a.bid-player:hover{color:#c8f491}
 .auction-teams article a.bid-player:focus-visible{outline:3px solid #cbff8b;outline-offset:2px}

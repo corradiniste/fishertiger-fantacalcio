@@ -84,6 +84,14 @@ export const saveProfile = async (profile, options = {}) => {
   });
 };
 
+export const deleteProfile = async (id, options = {}) => {
+  const profileKey = profileId(id);
+  return requestJson(apiUrl(`/api/profiles/${encodeURIComponent(profileKey)}`, options.apiBase), {
+    ...options,
+    method: "DELETE",
+  });
+};
+
 export const generateProfile = async (profileOrId, options = {}) => {
   const request = typeof profileOrId === "string"
     ? { profile_id: profileId(profileOrId) }

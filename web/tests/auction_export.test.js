@@ -46,7 +46,23 @@ test("buildExportPayload normalizes camelCase auction state", () => {
       { player_id: 22, owner: 1, price: 12 },
     ],
     role_budget_percentages: { P: 7, D: 18, C: 25, A: 50 },
+    custom_players: [],
   });
+});
+
+test("buildExportPayload includes custom players", () => {
+  const payload = buildExportPayload(
+    {
+      ...sampleState,
+      customPlayers: [
+        { id: -1, nome: "Rossi Mario", ruolo: "A", squadra: "Roma" },
+      ],
+    },
+    { profileId: "my-team", season: "2026-27" },
+  );
+  assert.deepEqual(payload.custom_players, [
+    { id: -1, nome: "Rossi Mario", ruolo: "A", squadra: "Roma" },
+  ]);
 });
 
 test("filenameFromDisposition reads attachment name", () => {

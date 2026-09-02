@@ -28,6 +28,11 @@ def test_local_store_round_trip(tmp_path: Path) -> None:
     store.put("alpha", {"profile_id": "alpha", "name": "Updated"})
     assert store.get("alpha")["name"] == "Updated"
 
+    assert store.delete("alpha") is True
+    assert store.get("alpha") is None
+    assert store.list_ids() == []
+    assert store.delete("alpha") is False
+
 
 def test_local_store_rejects_invalid_json_object(tmp_path: Path) -> None:
     directory = tmp_path / "profiles"

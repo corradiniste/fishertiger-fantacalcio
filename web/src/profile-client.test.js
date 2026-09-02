@@ -11,6 +11,7 @@ import {
   refreshUnderstatSources,
   rulesFor,
   saveProfile,
+  deleteProfile,
   waitForUnderstatRefresh,
 } from "./profile-client.js";
 
@@ -99,6 +100,24 @@ test("saveProfile PUTs the profile JSON to the local API", async () => {
   assert.equal(calls[0].url, "http://api.test/api/profiles/league-a");
   assert.equal(calls[0].method, "PUT");
   assert.equal(JSON.parse(calls[0].body).name, "Saved");
+});
+
+test("deleteProfile DELETEs the profile endpoint", async () => {
+  const calls = [];
+  const payload = await deleteProfile("league-a", {
+    apiBase: "http://api.test",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, ...options });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ deleted: "league-a", datasets_removed: 2, uploads_removed: 1 }),
+      };
+    },
+  });
+  assert.equal(payload.deleted, "league-a");
+  assert.equal(calls[0].url, "http://api.test/api/profiles/league-a");
+  assert.equal(calls[0].method, "DELETE");
 });
 
 test("loadProfile and listProfiles hit the profile endpoints", async () => {

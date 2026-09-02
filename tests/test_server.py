@@ -79,6 +79,40 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(payload, self.profile)
 
+    def test_delete_profile_removes_profile_datasets_and_uploads(self):
+        body = json.dumps(self.profile).encode("utf-8")
+        response, _ = self.request(
+            "PUT",
+            "/api/profiles/my-team",
+            body,
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status, 200)
+
+        season = self.profile["season"]["season"].replace("/", "-")
+        dataset = Path(self.temp_dir.name) / "data/processed/my-team" / season / "auction_data.json"
+        dataset.parent.mkdir(parents=True)
+        dataset.write_text('{"ok":true}', encoding="utf-8")
+        upload = Path(self.temp_dir.name) / "data/uploads/my-team/current_sources/player_list.xlsx"
+        upload.parent.mkdir(parents=True)
+        upload.write_bytes(b"xlsx")
+
+        response, payload = self.request("DELETE", "/api/profiles/my-team")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["deleted"], "my-team")
+        self.assertGreaterEqual(payload["datasets_removed"], 1)
+        self.assertGreaterEqual(payload["uploads_removed"], 1)
+
+        response, payload = self.request("GET", "/api/profiles/my-team")
+        self.assertEqual(response.status, 404)
+        self.assertEqual(payload["error"]["code"], "profile_not_found")
+        self.assertFalse(dataset.exists())
+        self.assertFalse(upload.exists())
+
+        response, payload = self.request("DELETE", "/api/profiles/my-team")
+        self.assertEqual(response.status, 404)
+        self.assertEqual(payload["error"]["code"], "profile_not_found")
+
     def test_rejects_unsafe_names_and_invalid_json_boundaries(self):
         response, payload = self.request("PUT", "/api/profiles/%2E%2E", b'{}', {"Content-Type": "application/json"})
         self.assertEqual(response.status, 400)

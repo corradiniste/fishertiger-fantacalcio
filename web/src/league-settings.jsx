@@ -383,6 +383,7 @@ export function LeagueSettings({
   leagueCalendar,
   onSave,
   onGenerate,
+  onDelete,
   apiBase = "",
 }) {
   const [profile, setProfile] = useState(() =>
@@ -391,6 +392,8 @@ export function LeagueSettings({
   const [errors, setErrors] = useState([]);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
   const [sourceStatuses, setSourceStatuses] = useState({});
   const [understatForce, setUnderstatForce] = useState(false);
   const [understatBusy, setUnderstatBusy] = useState(false);
@@ -591,6 +594,34 @@ export function LeagueSettings({
       );
     } finally {
       setBusy(false);
+    }
+  };
+  const removeLeague = async () => {
+    if (!onDelete || !profile.profile_id) return;
+    if (deleteConfirm.trim() !== profile.profile_id) {
+      setErrors([
+        `Digita esattamente l'ID profilo (${profile.profile_id}) per confermare l'eliminazione.`,
+      ]);
+      requestAnimationFrame(() => errorRef.current?.focus());
+      return;
+    }
+    const confirmed = window.confirm(
+      `Eliminare la lega "${profile.name || profile.profile_id}"?\n\nVerranno cancellati profilo, dataset generati e upload collegati. L'operazione non si può annullare.`,
+    );
+    if (!confirmed) return;
+    setDeleteBusy(true);
+    setErrors([]);
+    setStatus("");
+    try {
+      await onDelete(profile.profile_id);
+      setStatus("Lega eliminata.");
+      setDeleteConfirm("");
+    } catch (error) {
+      setStatus(
+        `Impossibile eliminare la lega: ${error instanceof Error ? error.message : "errore sconosciuto"}.`,
+      );
+    } finally {
+      setDeleteBusy(false);
     }
   };
   const uploadSource = async (group, index, file) => {
@@ -1438,6 +1469,46 @@ export function LeagueSettings({
           </p>
         </div>
       </fieldset>
+      {typeof onDelete === "function" && (
+        <section className="ls-danger" aria-labelledby="ls-danger-title">
+          <div className="ls-subheading">
+            <h3 id="ls-danger-title">Zona pericolosa</h3>
+            <span>Irreversibile</span>
+          </div>
+          <p className="ls-field-help">
+            Elimina questa lega dal catalogo: profilo, dataset generati e file
+            caricati. L&apos;asta salvata in locale per questo ID viene
+            cancellata al prossimo passaggio.
+          </p>
+          <label className="ls-field">
+            Digita <code>{profile.profile_id || "ID profilo"}</code> per
+            confermare
+            <input
+              type="text"
+              value={deleteConfirm}
+              autoComplete="off"
+              spellCheck="false"
+              disabled={busy || deleteBusy || !profile.profile_id}
+              placeholder={profile.profile_id || "ID profilo"}
+              onChange={(event) => setDeleteConfirm(event.target.value)}
+              aria-label="Conferma ID profilo da eliminare"
+            />
+          </label>
+          <button
+            type="button"
+            className="ls-delete"
+            disabled={
+              busy ||
+              deleteBusy ||
+              !profile.profile_id ||
+              deleteConfirm.trim() !== profile.profile_id
+            }
+            onClick={removeLeague}
+          >
+            {deleteBusy ? "Eliminazione..." : "Elimina lega"}
+          </button>
+        </section>
+      )}
       <footer className="ls-actions">
         <p>
           {sourcesReady
@@ -1447,18 +1518,18 @@ export function LeagueSettings({
         <button
           type="button"
           className="ls-understat-sync"
-          disabled={busy || understatBusy || !profile.profile_id}
+          disabled={busy || understatBusy || deleteBusy || !profile.profile_id}
           onClick={syncUnderstat}
         >
           {understatBusy ? "Understat..." : "Sincronizza Understat"}
         </button>
-        <button type="submit" disabled={busy}>
+        <button type="submit" disabled={busy || deleteBusy}>
           {busy ? "Salvataggio..." : "Salva profilo"}
         </button>
         <button
           type="button"
           className="ls-generate"
-          disabled={busy || !sourcesReady}
+          disabled={busy || deleteBusy || !sourcesReady}
           onClick={() => save(true)}
         >
           {busy ? "Elaborazione..." : "Salva e genera"}

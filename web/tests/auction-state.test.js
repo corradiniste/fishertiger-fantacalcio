@@ -4,8 +4,10 @@ import {
   addBid,
   advanceNominator,
   clearBids,
+  createCustomPlayer,
   emptyAuction,
   legalMaxBid,
+  mergeAuctionPlayers,
   rehydrateAuction,
   replayHistory,
   serializeAuction,
@@ -239,4 +241,49 @@ test("replayHistory rejects already assigned players", () => {
     ),
     null,
   );
+});
+
+test("createCustomPlayer builds negative ids and rejects duplicates", () => {
+  const first = createCustomPlayer(
+    { nome: " Verdi  ", ruolo: "a", squadra: "Milan" },
+    players,
+  );
+  assert.ok(first);
+  assert.equal(first.id, -1);
+  assert.equal(first.nome, "Verdi");
+  assert.equal(first.ruolo, "A");
+  assert.equal(first.squadra, "Milan");
+  assert.equal(first.custom, true);
+  assert.equal(
+    createCustomPlayer(
+      { nome: "verdi", ruolo: "A", squadra: "milan" },
+      [...players, first],
+    ),
+    null,
+  );
+  const second = createCustomPlayer(
+    { nome: "Bianchi", ruolo: "C", squadra: "Inter" },
+    [...players, first],
+  );
+  assert.equal(second.id, -2);
+});
+
+test("serialize and rehydrate keep custom players assignable", () => {
+  const custom = createCustomPlayer(
+    { nome: "Neri", ruolo: "A", squadra: "Napoli" },
+    players,
+  );
+  const pool = mergeAuctionPlayers(players, [custom]);
+  const seed = emptyAuction(rules);
+  seed.customPlayers = [custom];
+  seed.history = [{ playerId: custom.id, owner: 0, price: 4 }];
+  const saved = serializeAuction(seed);
+  assert.equal(saved.customPlayers.length, 1);
+  assert.equal(saved.customPlayers[0].id, custom.id);
+  const state = rehydrateAuction(saved, players, rules);
+  assert.ok(state);
+  assert.equal(state.customPlayers.length, 1);
+  assert.equal(state.teams[0].roster[0].nome, "Neri");
+  assert.equal(state.assigned[String(custom.id)].price, 4);
+  assert.equal(mergeAuctionPlayers(players, state.customPlayers).length, pool.length);
 });
