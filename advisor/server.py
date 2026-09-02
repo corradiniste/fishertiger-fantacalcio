@@ -80,11 +80,9 @@ FIXED_SOURCE_SUFFIXES = {
     },
 }
 VITE_ORIGIN = re.compile(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?\Z")
-PLAYER_UNDERSTAT_PATH = re.compile(r"/api/players/(\d+)/understat\Z")
 ProfileLoader = Callable[[dict[str, Any]], Any]
 SimulationRunner = Callable[[Any, Path, int, int], dict[str, Any]]
 UnderstatFetcher = Callable[..., list[Path]]
-UnderstatPlayerFetcher = Callable[..., dict[str, Any]]
 
 
 class LocalApiServer(ThreadingHTTPServer):
@@ -104,7 +102,6 @@ class LocalApiServer(ThreadingHTTPServer):
         profile_store: ProfileStore | None = None,
         persistence: PersistenceBundle | None = None,
         understat_fetcher: UnderstatFetcher | None = None,
-        understat_player_fetcher: UnderstatPlayerFetcher | None = None,
         raw_dir: Path | str = Path("data/raw"),
     ) -> None:
         self.profiles_dir = Path(profiles_dir)
@@ -116,7 +113,6 @@ class LocalApiServer(ThreadingHTTPServer):
         self.simulator = simulator or _simulate_current_dataset
         self.profile_loader = profile_loader
         self.understat_fetcher = understat_fetcher
-        self.understat_player_fetcher = understat_player_fetcher
         self.persistence = persistence or create_persistence(
             profiles_dir=self.profiles_dir,
             datasets_dir=self.datasets_dir,
@@ -128,9 +124,6 @@ class LocalApiServer(ThreadingHTTPServer):
         self.refresh_jobs: dict[str, dict[str, Any]] = {}
         self.refresh_lock = threading.Lock()
         self.refresh_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="understat-refresh")
-        self.player_detail_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="understat-player")
-        self.player_detail_locks: dict[int, threading.Lock] = {}
-        self.player_detail_locks_guard = threading.Lock()
         super().__init__(address, LocalApiHandler)
 
 
@@ -142,7 +135,6 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self._path()
-        player_match = PLAYER_UNDERSTAT_PATH.fullmatch(path)
         if path == "/api/profiles":
             self._profile_index()
         elif path == "/api/default-profile":
@@ -155,8 +147,6 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._get_dataset(path.removeprefix("/api/datasets/"))
         elif path == "/api/sources/refresh/status":
             self._refresh_status()
-        elif player_match:
-            self._player_understat(int(player_match.group(1)))
         else:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
@@ -612,147 +602,6 @@ class LocalApiHandler(BaseHTTPRequestHandler):
     def _query_params(self) -> dict[str, list[str]]:
         return parse_qs(urlparse(self.path).query, keep_blank_values=False)
 
-    def _player_lock(self, understat_id: int) -> threading.Lock:
-        with self.server.player_detail_locks_guard:
-            lock = self.server.player_detail_locks.get(understat_id)
-            if lock is None:
-                lock = threading.Lock()
-                self.server.player_detail_locks[understat_id] = lock
-            return lock
-
-    def _player_understat(self, fantacalcio_id: int) -> None:
-        params = self._query_params()
-        profile_id = (params.get("profile_id") or [None])[0]
-        force = (params.get("force") or ["0"])[0].lower() in {"1", "true", "yes"}
-        seasons_raw = (params.get("seasons") or [""])[0]
-
-        if not profile_id:
-            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", "Query profile_id is required.")
-            return
-        try:
-            profile = resolve_profile(
-                {"profile_id": profile_id},
-                self.server.profiles_dir,
-                profile_store=self.server.profile_store,
-                profile_loader=self.server.profile_loader,
-            )
-        except ProfileRequestError as error:
-            message = str(error)
-            code = "profile_not_found" if "does not exist" in message else "invalid_profile"
-            status = HTTPStatus.NOT_FOUND if code == "profile_not_found" else HTTPStatus.BAD_REQUEST
-            self._error(status, code, message)
-            return
-
-        if seasons_raw.strip():
-            try:
-                seasons = [int(part.strip()) for part in seasons_raw.split(",") if part.strip()]
-            except ValueError:
-                self._error(HTTPStatus.BAD_REQUEST, "invalid_seasons", "Seasons must be integers.")
-                return
-        else:
-            try:
-                seasons = list(profile.understat_seasons())
-            except (TypeError, ValueError, AttributeError):
-                seasons = [
-                    int(str(source.season).split("-")[0].split("/")[0])
-                    for source in getattr(profile, "understat_sources", ())
-                    if getattr(source, "season", None) not in (None, "")
-                ]
-            if not seasons:
-                seasons = [int(str(profile.season.season).split("/", 1)[0])]
-        try:
-            from .understat import validate_seasons
-
-            seasons = validate_seasons(seasons, max_count=8)
-        except ValueError as error:
-            self._error(HTTPStatus.BAD_REQUEST, "invalid_seasons", str(error))
-            return
-
-        output_dir = self.server.datasets_dir / profile.profile_id / profile.season.season.replace("/", "-")
-        try:
-            self._ensure_auction_dataset(output_dir, profile)
-        except Exception:
-            pass
-        auction_path = output_dir / "auction_data.json"
-        if not auction_path.is_file():
-            self._error(HTTPStatus.NOT_FOUND, "dataset_not_found", "auction_data.json is missing for this profile.")
-            return
-        try:
-            auction = json.loads(auction_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json is unreadable.")
-            return
-        players = auction.get("players") if isinstance(auction, dict) else None
-        if not isinstance(players, list):
-            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "auction_data.json has no players list.")
-            return
-        player = None
-        for item in players:
-            if not isinstance(item, dict):
-                continue
-            try:
-                if int(item.get("id")) == fantacalcio_id:
-                    player = item
-                    break
-            except (TypeError, ValueError):
-                continue
-        if player is None:
-            self._error(HTTPStatus.NOT_FOUND, "player_not_found", "No player matches that fantacalcio id.")
-            return
-
-        from .understat_player import resolve_understat_id
-
-        understat_id = resolve_understat_id(player)
-        if understat_id is None:
-            self._error(
-                HTTPStatus.NOT_FOUND,
-                "no_understat_id",
-                "This player has no matched Understat id.",
-            )
-            return
-
-        fetcher = self.server.understat_player_fetcher
-        if fetcher is None:
-            from .understat_player import PLAYER_CACHE_DIR, fetch_player_detail as fetcher
-
-            cache_dir = PLAYER_CACHE_DIR
-        else:
-            cache_dir = self.server.raw_dir / "understat_players"
-
-        lock = self._player_lock(understat_id)
-
-        def run() -> dict[str, Any]:
-            with lock:
-                return fetcher(
-                    understat_id,
-                    seasons,
-                    cache_dir=cache_dir,
-                    force=force,
-                )
-
-        future = self.server.player_detail_executor.submit(run)
-        try:
-            detail = future.result(timeout=60)
-        except TimeoutError:
-            self._error(HTTPStatus.GATEWAY_TIMEOUT, "understat_timeout", "Understat player detail timed out.")
-            return
-        except Exception as error:
-            self._error(HTTPStatus.BAD_GATEWAY, "understat_fetch_failed", str(error) or "Understat fetch failed.")
-            return
-
-        self._send_json(
-            HTTPStatus.OK,
-            {
-                "fantacalcio_id": fantacalcio_id,
-                "understat_id": understat_id,
-                "radar": detail.get("radar"),
-                "shots": detail.get("shots") or {},
-                "matches": detail.get("matches") or [],
-                "fetched_at": detail.get("fetched_at"),
-                "cached_at": detail.get("cached_at"),
-            },
-        )
-
     def _derive_calendar_participants(self, profile: Any) -> Any:
         """Use the league calendar as the authoritative participant roster when available."""
         source = next((item for item in profile.current_sources if item.name == "league_calendar"), None)
@@ -957,7 +806,6 @@ def create_server(
     profile_store: ProfileStore | None = None,
     persistence: PersistenceBundle | None = None,
     understat_fetcher: UnderstatFetcher | None = None,
-    understat_player_fetcher: UnderstatPlayerFetcher | None = None,
     raw_dir: Path | str = Path("data/raw"),
 ) -> LocalApiServer:
     """Create a local API server; inject a pipeline generator for tests or embedding."""
@@ -973,7 +821,6 @@ def create_server(
         profile_store=profile_store,
         persistence=persistence,
         understat_fetcher=understat_fetcher,
-        understat_player_fetcher=understat_player_fetcher,
         raw_dir=raw_dir,
     )
 

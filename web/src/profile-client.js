@@ -127,26 +127,6 @@ export const understatRefreshStatus = async (jobId, options = {}) => {
   return requestJson(apiUrl(`/api/sources/refresh/status${query}`, options.apiBase), options);
 };
 
-/** Lazy-load Understat radar / shots / matches for one fantacalcio player. */
-export const fetchPlayerUnderstat = async (
-  fantacalcioId,
-  { seasons, force = false, profileId: id, apiBase, ...options } = {},
-) => {
-  const numericId = Number(fantacalcioId);
-  if (!Number.isInteger(numericId) || numericId <= 0)
-    fail("invalid_player_id", "A positive fantacalcio player id is required.");
-  if (!id) fail("invalid_profile_id", "profileId is required for Understat player detail.");
-  const params = new URLSearchParams();
-  params.set("profile_id", profileId(id));
-  if (Array.isArray(seasons) && seasons.length)
-    params.set("seasons", seasons.map(Number).filter((value) => Number.isFinite(value)).join(","));
-  if (force) params.set("force", "1");
-  return requestJson(
-    apiUrl(`/api/players/${numericId}/understat?${params.toString()}`, apiBase),
-    options,
-  );
-};
-
 /** Poll until the refresh job completes or fails. */
 export const waitForUnderstatRefresh = async (jobId, options = {}) => {
   if (!jobId) fail("invalid_job_id", "A refresh job id is required.");

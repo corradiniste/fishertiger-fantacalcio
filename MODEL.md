@@ -27,9 +27,6 @@ that season.
   `overperformance` mirror the profile’s current season when available.
 - These fields are **informative only** and do not alter `event_rates`,
   projections, or Monte Carlo sampling in this model version.
-- Per-player Understat detail (radar / shots / matches) is fetched lazily via
-  `GET /api/players/{id}/understat` and is **not** stored in `auction_data.json`.
-  Schema remains 1.1; the detail payload is UI-only context.
 
 ## Auction values
 

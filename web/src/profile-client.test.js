@@ -12,7 +12,6 @@ import {
   rulesFor,
   saveProfile,
   waitForUnderstatRefresh,
-  fetchPlayerUnderstat,
 } from "./profile-client.js";
 
 const profile = {
@@ -155,35 +154,6 @@ test("refreshUnderstatSources posts seasons and polls status until completed", a
     intervalMs: 1,
   });
   assert.equal(done.status, "completed");
-});
-
-test("fetchPlayerUnderstat hits player detail endpoint with seasons and force", async () => {
-  const calls = [];
-  const payload = await fetchPlayerUnderstat(5841, {
-    seasons: [2026, 2025],
-    force: true,
-    profileId: "league-a",
-    apiBase: "http://api.test",
-    fetchImpl: async (url, options = {}) => {
-      calls.push({ url, ...options });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          fantacalcio_id: 5841,
-          understat_id: 10967,
-          radar: { stats: ["xG"], seasons: { "2025": { xG: 80 } } },
-          shots: {},
-          matches: [],
-        }),
-      };
-    },
-  });
-  assert.equal(payload.understat_id, 10967);
-  assert.match(calls[0].url, /\/api\/players\/5841\/understat\?/);
-  assert.match(calls[0].url, /profile_id=league-a/);
-  assert.match(calls[0].url, /seasons=2026%2C2025|seasons=2026,2025/);
-  assert.match(calls[0].url, /force=1/);
 });
 
 test("generateProfile posts the profile body to /api/generate", async () => {

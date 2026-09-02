@@ -30,20 +30,3 @@ each player as informative context. They do not feed the Monte Carlo model.
   `config/identity_overrides.json`. Review unmatched rows in
   `matching_review.csv`.
 - Personal / private-league use only; refresh occasionally, never poll.
-
-## Understat per-player (optional, lazy)
-
-Radar ratings, shot map, and match history load on demand when a player detail
-panel opens — not during generate, and not into Monte Carlo.
-
-- Endpoints (after warm-up `GET /player/{id}`):
-  - `GET /getRadarData/{id}`
-  - `GET /getShotData/{id}/{season}`
-  - `GET /getMatchesData/{id}`
-  All with `X-Requested-With: XMLHttpRequest`.
-- Local API: `GET /api/players/{fantacalcio_id}/understat?profile_id=...&seasons=2026,2025&force=0`
-  resolves `understat_id` from `auction_data.json`, then fetches/caches.
-- Cache: `data/raw/understat_players/{understat_id}/radar.json`,
-  `shots_{season}.json`, `matches.json` — TTL 24h unless `force=1`.
-- Rate-limit ~1s between Understat requests; one in-flight lock per player id.
-- Missing match → UI empty state. Radar failure does not abort shots/matches.
