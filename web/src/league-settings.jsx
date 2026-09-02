@@ -445,7 +445,12 @@ export function LeagueSettings({
     fetch(endpoint("/api/sources/status"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(profile),
+      // Send only source manifests so incomplete drafts (empty id/name) still resolve.
+      body: JSON.stringify({
+        current_sources: profile.current_sources,
+        history_sources: profile.history_sources,
+        understat_sources: profile.understat_sources || [],
+      }),
       signal: controller.signal,
     })
       .then((response) =>

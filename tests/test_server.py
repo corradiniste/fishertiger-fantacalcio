@@ -262,6 +262,47 @@ class LocalApiServerTests(unittest.TestCase):
         )
         self.assertTrue(player_list["exists"])
 
+    def test_source_status_accepts_incomplete_draft(self):
+        draft = {
+            "profile_id": "",
+            "name": "",
+            "current_sources": [
+                {
+                    "name": "player_list",
+                    "path": str(Path(self.temp_dir.name) / "missing.xlsx"),
+                    "format": "xlsx",
+                    "required": True,
+                }
+            ],
+            "history_sources": [
+                {
+                    "name": "stats_2025_26",
+                    "path": str(Path(self.temp_dir.name) / "missing-history.xlsx"),
+                    "format": "xlsx",
+                    "required": True,
+                    "season": "2025-26",
+                }
+            ],
+            "understat_sources": [
+                {
+                    "name": "understat_2026",
+                    "path": str(Path(self.temp_dir.name) / "missing-understat.json"),
+                    "format": "json",
+                    "required": False,
+                    "season": "2026",
+                }
+            ],
+        }
+        response, payload = self.request(
+            "POST",
+            "/api/sources/status",
+            json.dumps(draft).encode("utf-8"),
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(payload["sources"]), 3)
+        self.assertFalse(all(source["exists"] for source in payload["sources"]))
+
     def test_upload_rejects_unsafe_paths_and_file_types(self):
         response, payload = self.request(
             "PUT",

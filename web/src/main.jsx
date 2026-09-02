@@ -7,15 +7,22 @@ import { ProfilePicker, ProfileSwitcher } from "./profile-picker.jsx";
 import { normalizeRules } from "./league-rules.js";
 import { activeNominationRole } from "./auction-nomination.js";
 import {
+  advanceNominator,
+  applyRulesStartingCredits,
   auctionStorageKey,
+  clearBids,
+  clearLot,
   emptyAuction,
   isValidBid,
   legalMaxBid,
   playerIdKey,
   rehydrateAuction,
+  replayHistory,
   serializeAuction,
+  setNominator,
   slotsLeft,
 } from "./auction-state.js";
+import { liveChannel, publishCelebration, publishLiveState, celebrationFromAssignment } from "./auction-live-sync.js";
 import {
   buildExportPayload,
   requestAuctionExport,
@@ -60,6 +67,26 @@ import {
 
 const ACTIVE_PROFILE_KEY = "fanta.activeProfileId";
 
+const readPlayerDeepLink = () => {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("view") === "players" && params.get("player")) {
+      return params.get("player");
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+};
+
+/** Deep-link href for player sheet; opens in a new tab from auction roster. */
+const playerSheetHref = (playerId) => {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", "players");
+  url.searchParams.set("player", String(playerId));
+  return `${url.pathname}${url.search}`;
+};
+
 const ROLE_LABELS = {
   P: "Portieri",
   D: "Difensori",
@@ -97,13 +124,20 @@ function App() {
   const [simulationStatus, setSimulationStatus] = useState("");
   const apiBase =
     import.meta.env.VITE_LOCAL_API_BASE || "http://127.0.0.1:8000";
-  const [view, setView] = useState("overview");
+  const [view, setView] = useState(() =>
+    readPlayerDeepLink() ? "players" : "overview",
+  );
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [selectedTeam, setSelectedTeam] = useState(null);
-  const [viewHistory, setViewHistory] = useState([
-    { view: "overview", player: null, team: null },
+  const [viewHistory, setViewHistory] = useState(() => [
+    {
+      view: readPlayerDeepLink() ? "players" : "overview",
+      player: null,
+      team: null,
+    },
   ]);
   const [historyIndex, setHistoryIndex] = useState(0);
+  const pendingPlayerDeepLink = useRef(readPlayerDeepLink());
 
   const refreshProfileCatalog = async () => {
     const names = await listProfiles({ apiBase }).catch(() => []);
@@ -121,14 +155,16 @@ function App() {
     return entries;
   };
 
-  const activateProfile = async (nextProfile, { skipPicker = true } = {}) => {
+  const activateProfile = async (nextProfile, { skipPicker = true, keepData = false } = {}) => {
     setProfile(nextProfile);
-    setData(null);
-    setSeason(null);
-    setSelectedPlayer(null);
-    setView("overview");
-    setViewHistory([{ view: "overview", player: null, team: null }]);
-    setHistoryIndex(0);
+    if (!keepData) {
+      setData(null);
+      setSeason(null);
+      setSelectedPlayer(null);
+      setView("overview");
+      setViewHistory([{ view: "overview", player: null, team: null }]);
+      setHistoryIndex(0);
+    }
     if (nextProfile?.profile_id) {
       try {
         localStorage.setItem(ACTIVE_PROFILE_KEY, nextProfile.profile_id);
@@ -155,9 +191,10 @@ function App() {
 
   const createNewProfile = () => {
     if (!defaultProfile) return;
+    const suffix = Date.now().toString(36);
     const draft = {
       ...defaultProfile,
-      profile_id: "",
+      profile_id: `lega-${suffix}`,
       name: "",
     };
     setBootPhase("ready");
@@ -242,10 +279,18 @@ function App() {
       .catch(() => setSeason(null));
   }, [apiBase, profile]);
   useEffect(() => {
-    const initialRoute = { view: "overview", player: null, team: null };
+    const deepPlayer = pendingPlayerDeepLink.current;
+    const initialRoute = {
+      view: deepPlayer ? "players" : "overview",
+      player: null,
+      team: null,
+    };
     window.history.replaceState(
       { fantaRoute: initialRoute, fantaIndex: 0 },
       "",
+      deepPlayer
+        ? `${window.location.pathname}${window.location.search}`
+        : window.location.pathname,
     );
     const restoreRoute = (event) => {
       const route = event.state?.fantaRoute;
@@ -256,6 +301,24 @@ function App() {
     window.addEventListener("popstate", restoreRoute);
     return () => window.removeEventListener("popstate", restoreRoute);
   }, []);
+  useEffect(() => {
+    const playerId = pendingPlayerDeepLink.current;
+    if (playerId == null || !data?.players?.length) return;
+    const player = data.players.find(
+      (candidate) => playerIdKey(candidate.id) === playerIdKey(playerId),
+    );
+    pendingPlayerDeepLink.current = null;
+    if (!player) return;
+    const route = { view: "players", player, team: selectedTeam };
+    setViewHistory([route]);
+    setHistoryIndex(0);
+    window.history.replaceState(
+      { fantaRoute: route, fantaIndex: 0 },
+      "",
+      playerSheetHref(player.id),
+    );
+    applyRoute(route);
+  }, [data, selectedTeam]);
   const applyRoute = (route) => {
     setView(route.view);
     setSelectedPlayer(route.player);
@@ -287,7 +350,7 @@ function App() {
     setProfileError("");
     try {
       const saved = await saveProfile(nextProfile, { apiBase });
-      await activateProfile(saved);
+      await activateProfile(saved, { keepData: !generate });
       await refreshProfileCatalog();
       if (!generate) return;
       const payload = await generateProfile(saved, { apiBase });
@@ -561,7 +624,6 @@ function App() {
       {view === "auction" && (
         <Auction
           data={data}
-          openPlayer={openPlayer}
           rules={activeRules}
           profileId={activeProfileId}
           apiBase={apiBase}
@@ -1824,7 +1886,7 @@ function AuctionOverview({ overview }) {
   );
 }
 
-function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
+function Auction({ data, rules, profileId, apiBase = "" }) {
   const activeRules = normalizeRules(
     rules ?? data.league_rules ?? { startingCredits: 750 },
   );
@@ -1873,8 +1935,10 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
   const [messageType, setMessageType] = useState("info");
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [editing, setEditing] = useState(false);
   const worker = useRef();
   const skipPersist = useRef(false);
+  const liveChannelRef = useRef(null);
   const workerHistory = state.history.flatMap((transaction) => {
     const transactionPlayer = data.players.find(
       (candidate) =>
@@ -1885,8 +1949,15 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
       : [];
   });
   useEffect(() => {
+    const next = loadAuction();
     skipPersist.current = true;
-    setState(loadAuction());
+    setState(next);
+    // rehydrate may sync startingCredits from rules; write through so LIVE sees it
+    const serialized = JSON.stringify(serializeAuction(next));
+    if (localStorage.getItem(storageKey) !== serialized) {
+      localStorage.setItem(storageKey, serialized);
+      skipPersist.current = false;
+    }
     setUserTeamIndex(defaultUserTeamIndex);
     setOwner(defaultUserTeamIndex);
     setPlayer(null);
@@ -1894,12 +1965,27 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
     setPrice("");
   }, [storageKey, rulesSignature, defaultUserTeamIndex]);
   useEffect(() => {
+    setState((current) => applyRulesStartingCredits(current, activeRules));
+  }, [activeRules.startingCredits]);
+  useEffect(() => {
     if (skipPersist.current) {
       skipPersist.current = false;
       return;
     }
     localStorage.setItem(storageKey, JSON.stringify(serializeAuction(state)));
   }, [state, storageKey]);
+  useEffect(() => {
+    const channel = liveChannel(activeProfileId);
+    liveChannelRef.current = channel;
+    publishLiveState(channel, state, activeProfileId);
+    return () => {
+      channel?.close();
+      if (liveChannelRef.current === channel) liveChannelRef.current = null;
+    };
+  }, [activeProfileId]);
+  useEffect(() => {
+    publishLiveState(liveChannelRef.current, state, activeProfileId);
+  }, [state, activeProfileId]);
   useEffect(() => {
     worker.current = new Worker(
       new URL("./simulation.worker.js", import.meta.url),
@@ -1955,12 +2041,13 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
     setQuery(candidate.nome);
     setPrice("");
     setSuggestionsOpen(false);
+    setState((s) => ({ ...clearBids(s), lot: { playerId: candidate.id } }));
     setMessage(`Hai selezionato ${candidate.nome}. Scegli squadra e prezzo.`);
     setMessageType("info");
   };
   const assign = () => {
-    const value = Number(price),
-      team = state.teams[owner];
+    const value = Number(price);
+    const team = state.teams[owner];
     if (!player) return;
     if (state.assigned[playerIdKey(player.id)]) {
       setMessage(`${player.nome} risulta gia assegnato.`);
@@ -1998,20 +2085,35 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
       );
       return setMessageType("error");
     }
-    setState((s) => ({
-      ...s,
-      teams: s.teams.map((t, i) =>
-        i === owner
-          ? { ...t, credits: t.credits - value, roster: [...t.roster, player] }
-          : t,
+    setState((s) =>
+      clearLot(
+        clearBids({
+          ...s,
+          teams: s.teams.map((t, i) =>
+            i === owner
+              ? { ...t, credits: t.credits - value, roster: [...t.roster, player] }
+              : t,
+          ),
+          assigned: {
+            ...s.assigned,
+            [playerIdKey(player.id)]: { owner, price: value },
+          },
+          history: [...s.history, { playerId: player.id, owner, price: value }],
+          undone: [],
+        }),
       ),
-      assigned: {
-        ...s.assigned,
-        [playerIdKey(player.id)]: { owner, price: value },
-      },
-      history: [...s.history, { playerId: player.id, owner, price: value }],
-      undone: [],
-    }));
+    );
+    publishCelebration(
+      liveChannelRef.current,
+      celebrationFromAssignment({
+        player,
+        teamName: team.name,
+        owner,
+        price: value,
+        seq: state.history.length + 1,
+      }),
+      activeProfileId,
+    );
     setMessage(`${player.nome} assegnato a ${team.name} per ${value} crediti.`);
     setMessageType("success");
     setPlayer(null);
@@ -2024,23 +2126,25 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
     setState((s) => {
       const assigned = { ...s.assigned };
       delete assigned[playerIdKey(last.playerId)];
-      return {
-        ...s,
-        assigned,
-        history: s.history.slice(0, -1),
-        undone: [...(s.undone || []), last],
-        teams: s.teams.map((t, i) =>
-          i === last.owner
-            ? {
-                ...t,
-                credits: t.credits + last.price,
-                roster: t.roster.filter(
-                  (p) => playerIdKey(p.id) !== playerIdKey(last.playerId),
-                ),
-              }
-            : t,
-        ),
-      };
+      return clearLot(
+        clearBids({
+          ...s,
+          assigned,
+          history: s.history.slice(0, -1),
+          undone: [...(s.undone || []), last],
+          teams: s.teams.map((t, i) =>
+            i === last.owner
+              ? {
+                  ...t,
+                  credits: t.credits + last.price,
+                  roster: t.roster.filter(
+                    (p) => playerIdKey(p.id) !== playerIdKey(last.playerId),
+                  ),
+                }
+              : t,
+          ),
+        }),
+      );
     });
     setMessage(
       `Annullata l'assegnazione di ${data.players.find((p) => playerIdKey(p.id) === playerIdKey(last.playerId))?.nome || "giocatore"}.`,
@@ -2086,6 +2190,49 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
     setMessage(`Ripristinata l'assegnazione di ${restoredPlayer.nome}.`);
     setMessageType("success");
   };
+  const applyHistory = (next) => {
+    const rebuilt = replayHistory(next, data.players, activeRules, state.teams);
+    if (!rebuilt) {
+      setMessage("Modifica non valida: budget o slot insufficienti.");
+      setMessageType("error");
+      return false;
+    }
+    setState((current) => ({
+      ...current,
+      teams: rebuilt.teams,
+      assigned: rebuilt.assigned,
+      history: rebuilt.history,
+      undone: [],
+    }));
+    return true;
+  };
+
+  const editBidPrice = (playerId, raw) => {
+    const value = Number(raw);
+    const key = playerIdKey(playerId);
+    const idx = state.history.findIndex(
+      (entry) => playerIdKey(entry.playerId) === key,
+    );
+    if (idx === -1) return;
+    const currentPrice = state.history[idx].price;
+    if (value === currentPrice) return;
+    const next = state.history.map((entry, index) =>
+      index === idx ? { ...entry, price: value } : entry,
+    );
+    applyHistory(next);
+  };
+
+  const deleteBid = (playerId) => {
+    const key = playerIdKey(playerId);
+    const next = state.history.filter(
+      (entry) => playerIdKey(entry.playerId) !== key,
+    );
+    if (next.length === state.history.length) return;
+    if (!applyHistory(next)) return;
+    setMessage("Chiamata rimossa.");
+    setMessageType("info");
+  };
+
   const flushAuction = () => {
     if (
       !window.confirm(
@@ -2093,6 +2240,7 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
       )
     )
       return;
+    setEditing(false);
     setState(emptyAuction(activeRules));
     setPlayer(null);
     setQuery("");
@@ -2136,6 +2284,34 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
   const canSetStartingCredits =
     state.history.length === 0 && !state.undone?.length;
   const selectedLegalMax = legalMaxBid(state.teams[owner], activeRules);
+  const openLiveBoard = () => {
+    const url = `/live.html?profile=${encodeURIComponent(activeProfileId)}`;
+    window.open(url, "fanta-live", "noopener,width=1280,height=800");
+  };
+  const replayLastCelebration = () => {
+    const last = state.history.at(-1);
+    if (!last) return;
+    const sold = data.players.find(
+      (candidate) => playerIdKey(candidate.id) === playerIdKey(last.playerId),
+    );
+    if (!sold) {
+      setMessage("Giocatore dell'ultima assegnazione non trovato.");
+      return setMessageType("error");
+    }
+    publishCelebration(
+      liveChannelRef.current,
+      celebrationFromAssignment({
+        player: sold,
+        teamName: state.teams[last.owner]?.name,
+        owner: last.owner,
+        price: last.price,
+        replay: true,
+      }),
+      activeProfileId,
+    );
+    setMessage(`Celebrazione inviata al LIVE: ${sold.nome}.`);
+    setMessageType("success");
+  };
   const updateStartingCredits = (teamIndex, value) => {
     const credits = Number(value);
     if (!Number.isInteger(credits) || credits < 25) return;
@@ -2277,11 +2453,31 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
           )}
         </div>
         <div className="auction-history">
+          <button type="button" className="open-live" onClick={openLiveBoard}>
+            Apri LIVE
+          </button>
+          <button
+            type="button"
+            className="replay-celeb"
+            onClick={replayLastCelebration}
+            disabled={!state.history.length}
+            title="Ripeti confetti e card sul tabellone LIVE"
+          >
+            Ripeti colpo
+          </button>
           <button onClick={undo} disabled={!state.history.length}>
             Annulla ultima
           </button>
           <button onClick={redo} disabled={!state.undone?.length}>
             Ripristina
+          </button>
+          <button
+            type="button"
+            className={editing ? "secondary edit-toggle is-active" : "edit-toggle"}
+            aria-pressed={editing}
+            onClick={() => setEditing((value) => !value)}
+          >
+            {editing ? "Fine modifica" : "Modifica"}
           </button>
           {state.history.length > 0 && (
             <button
@@ -2299,6 +2495,35 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
           </button>
         </div>
       </div>
+      <section className="auction-nomination" aria-label="Squadra di turno">
+        <label className="auction-field">
+          Squadra di turno
+          <select
+            value={state.nominator ?? 0}
+            onChange={(e) =>
+              setState((s) => setNominator(s, Number(e.target.value)))
+            }
+          >
+            {state.teams.map((team, index) => (
+              <option value={index} key={index}>
+                {team.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="auction-nomination__actions">
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => setState((s) => advanceNominator(s))}
+          >
+            Prossima squadra
+          </button>
+        </div>
+        <p className="auction-nomination__hint">
+          Evidenziata sul tabellone LIVE come squadra che chiama.
+        </p>
+      </section>
       {player && (
         <section className="auction-advice">
           <div>
@@ -2342,9 +2567,14 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
           </label>
           <div className="auction-actions">
             <button onClick={assign}>Conferma assegnazione</button>
-            <button className="secondary" onClick={() => openPlayer(player)}>
+            <a
+              className="secondary"
+              href={playerSheetHref(player.id)}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
               Vedi scheda
-            </button>
+            </a>
             <button
               className="secondary"
               onClick={() => {
@@ -2352,6 +2582,7 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
                 setQuery("");
                 setPrice("");
                 setSuggestionsOpen(false);
+                setState((s) => clearLot(clearBids(s)));
                 setMessage("Selezione annullata.");
                 setMessageType("info");
               }}
@@ -2362,12 +2593,21 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
         </section>
       )}
       {player && advice && <AuctionStrategy advice={advice} />}
-      <div className="auction-teams">
+      <div className={`auction-teams${editing ? " is-editing" : ""}`}>
         {state.teams.map((team, i) => {
           const left = slotsLeft(team, activeRules),
             max = legalMaxBid(team, activeRules);
+          const isNominator = i === (state.nominator ?? 0);
           return (
-            <article key={i}>
+            <article
+              key={i}
+              className={[
+                isNominator ? "is-nominator" : "",
+                editing ? "editing" : "",
+              ]
+                .filter(Boolean)
+                .join(" ") || undefined}
+            >
               <label>
                 Nome squadra
                 <input
@@ -2383,6 +2623,10 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
                   }
                 />
               </label>
+              <div className="auction-team-flags">
+                {isNominator && <span className="flag-call">Chiama</span>}
+                {editing && <span className="flag-edit">Modifica</span>}
+              </div>
               {canSetStartingCredits ? (
                 <label className="starting-credits">
                   Crediti iniziali
@@ -2404,13 +2648,63 @@ function Auction({ data, openPlayer, rules, profileId, apiBase = "" }) {
                 Max bid {max} · P{left.P} D{left.D} C{left.C} A{left.A}
               </p>
               {team.roster.length ? (
-                team.roster.map((p) => (
-                  <button key={p.id} onClick={() => openPlayer(p)}>
-                    <i className={"role " + p.ruolo}>{p.ruolo}</i>
-                    {p.nome}
-                    <em>{state.assigned[playerIdKey(p.id)]?.price}</em>
-                  </button>
-                ))
+                team.roster.map((p) => {
+                  const assignedPrice =
+                    state.assigned[playerIdKey(p.id)]?.price;
+                  if (editing) {
+                    return (
+                      <div className="bid-row" key={p.id}>
+                        <i className={"role " + p.ruolo}>{p.ruolo}</i>
+                        <span className="bid-row__name">{p.nome}</span>
+                        <input
+                          type="number"
+                          min={activeRules.auction.minPrice}
+                          step={activeRules.auction.increment}
+                          key={`${playerIdKey(p.id)}-${assignedPrice}`}
+                          defaultValue={assignedPrice}
+                          onBlur={(e) => editBidPrice(p.id, e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") e.currentTarget.blur();
+                          }}
+                          aria-label={`Prezzo ${p.nome}`}
+                        />
+                        <button
+                          type="button"
+                          className="bid-delete"
+                          aria-label={`Elimina chiamata ${p.nome}`}
+                          onClick={() => deleteBid(p.id)}
+                        >
+                          <svg
+                            viewBox="0 0 16 16"
+                            width="14"
+                            height="14"
+                            aria-hidden="true"
+                            focusable="false"
+                          >
+                            <path
+                              fill="currentColor"
+                              d="M5.5 1h5l.5 1H14v1.5H2V2h3l.5-1zm-1 4h8l-.6 9.2A1.5 1.5 0 0 1 10.4 15.5H5.6a1.5 1.5 0 0 1-1.5-1.3L3.5 5z"
+                            />
+                          </svg>
+                        </button>
+                      </div>
+                    );
+                  }
+                  return (
+                    <a
+                      key={p.id}
+                      className="bid-player"
+                      href={playerSheetHref(p.id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={`Apri scheda ${p.nome} in una nuova scheda`}
+                    >
+                      <i className={"role " + p.ruolo}>{p.ruolo}</i>
+                      {p.nome}
+                      <em>{assignedPrice}</em>
+                    </a>
+                  );
+                })
               ) : (
                 <span className="empty-roster">Nessun giocatore</span>
               )}

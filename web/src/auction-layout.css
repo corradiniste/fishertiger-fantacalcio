@@ -8,8 +8,81 @@
 .auction-history .export-xls { border-color: #6a8f5c; background: #2a4633; }
 .auction-history .export-xls:hover:not(:disabled) { background: #355c40; border-color: #a4d089; }
 .auction-history .export-xls[aria-busy="true"] { cursor: progress; }
+.auction-history .open-live { border-color: #b59a3d; background: #3a3218; color: #f0d36a; }
+.auction-history .open-live:hover { background: #4a4020; border-color: #f0d36a; }
+.auction-history .replay-celeb { border-color: #6a8f5c; background: #2a4633; color: #d7f0b8; }
+.auction-history .replay-celeb:hover:not(:disabled) { background: #355c40; border-color: #a4d089; }
 .auction-history .flush { border-color: #9c665a; background: #4a302b; }
 .auction-history .flush:hover { background: #653c33; border-color: #e0a18e; }
+.auction-nomination {
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) auto minmax(180px, 1fr);
+  align-items: end;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 14px;
+  border: 1px solid #405046;
+  border-radius: 9px;
+  background: #18221b;
+}
+.auction-nomination .auction-field { color: #bce785; font-size: 12px; font-weight: 700; min-width: 0; }
+.auction-nomination .auction-field select,
+.auction-nomination .auction-field input {
+  display: block;
+  width: 100%;
+  height: 42px;
+  margin-top: 5px;
+  border: 1px solid #526258;
+  border-radius: 6px;
+  background: #101712;
+  color: #f7fff1;
+  padding: 7px 9px;
+  font-weight: 700;
+}
+.auction-nomination__actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.auction-nomination__actions button {
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid #55715e;
+  border-radius: 8px;
+  background: #263a2d;
+  color: #f4faee;
+  font-weight: 700;
+}
+.auction-nomination__actions button.secondary { background: #27342b; }
+.auction-nomination__hint {
+  margin: 0;
+  align-self: center;
+  color: #9eaca0;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.auction-team-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0 2px;
+  min-height: 18px;
+}
+.auction-team-flags .flag-call {
+  display: inline-flex;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  background: #3a3218;
+  color: #f0d36a;
+}
+.auction-teams article.is-nominator {
+  border-color: #c9a84a;
+  box-shadow: 0 0 0 1px rgba(240, 211, 106, 0.28);
+}
 .auction-owner { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 20px 0 -10px; color: #bce785; font-size: 12px; font-weight: 700; }
 .auction-owner select { min-width: 180px; border: 1px solid #526258; border-radius: 6px; background: #101712; color: #f7fff1; padding: 7px 9px; font-weight: 700; }
 .auction-owner small { color: #aeb9b0; font-weight: 400; }
@@ -27,6 +100,10 @@
 @media (max-width: 1050px) {
   .auction-advice { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .auction-actions { align-self: auto; margin-top: 0; justify-content: flex-start; }
+  .auction-nomination {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .auction-nomination__hint { grid-column: 1 / -1; }
 }
 
 @media (max-width: 760px) {
@@ -35,4 +112,5 @@
   .auction-history { margin-top: 10px; }
   .auction-owner { align-items: flex-start; flex-direction: column; margin-bottom: 14px; }
   .auction-advice { grid-template-columns: 1fr !important; gap: 12px !important; }
+  .auction-nomination { grid-template-columns: 1fr; }
 }

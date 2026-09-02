@@ -442,25 +442,40 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         value = self._read_json_object()
         if value is None:
             return
+        # Status checks should work on incomplete drafts (empty id/name while typing).
+        # Full LeagueProfile validation is only required for save/generate.
         try:
             profile = self.server.profile_loader(value)
-        except (AttributeError, TypeError, ValueError, KeyError) as error:
-            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
-            return
-        try:
-            hydrate_profile_sources(profile, self.server.blob_store, project_root=PROJECT_ROOT)
-        except DataStoreError:
-            pass
+        except (AttributeError, TypeError, ValueError, KeyError):
+            profile = None
+        if profile is not None:
+            try:
+                hydrate_profile_sources(profile, self.server.blob_store, project_root=PROJECT_ROOT)
+            except DataStoreError:
+                pass
         statuses = []
         for group in SOURCE_GROUPS:
-            for source in getattr(profile, group, ()):
-                declared = Path(source.path)
+            raw_sources = getattr(profile, group, None) if profile is not None else value.get(group)
+            if raw_sources is None:
+                raw_sources = ()
+            for source in raw_sources:
+                if profile is not None:
+                    name = source.name
+                    path = source.path
+                else:
+                    if not isinstance(source, dict):
+                        continue
+                    name = source.get("name")
+                    path = source.get("path")
+                    if not isinstance(name, str) or not isinstance(path, str) or not name.strip() or not path.strip():
+                        continue
+                declared = Path(path)
                 candidates = [declared] if declared.is_absolute() else [declared, Path.cwd() / declared, PROJECT_ROOT / declared]
                 existing_path = next((candidate for candidate in candidates if candidate.is_file()), None)
                 statuses.append({
                     "group": group,
-                    "name": source.name,
-                    "path": source.path,
+                    "name": name,
+                    "path": path,
                     "exists": existing_path is not None,
                 })
         self._send_json(HTTPStatus.OK, {"sources": statuses})

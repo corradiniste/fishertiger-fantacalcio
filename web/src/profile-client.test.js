@@ -54,6 +54,21 @@ test("accepts legacy payloads and resolves profile rules for league engines", ()
   assert.equal(rules.defenseModifier.enabled, true);
 });
 
+test("normalizeDataset overlays profile credits onto stale league_rules", () => {
+  const data = normalizeDataset(
+    {
+      schema_version: "1.0",
+      meta: { profile: { profile_id: "league-a" } },
+      players: [],
+      league_rules: { starting_credits: 750, participants: 8 },
+    },
+    profile,
+  );
+  assert.equal(data.league_rules.starting_credits, 600);
+  assert.equal(data.league_rules.startingCredits, 600);
+  assert.equal(rulesFor(profile, data).startingCredits, 600);
+});
+
 test("normalizes extra formation strings for browser engines", () => {
   const rules = rulesFor({ ...profile, formations: { allowed: ["2-1-7", [6, 3, 1]] } });
   assert.deepEqual(rules.formations, [[2, 1, 7], [6, 3, 1]]);

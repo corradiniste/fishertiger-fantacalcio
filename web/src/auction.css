@@ -1,1 +1,20 @@
 .auction-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:20px 0}.auction-summary>div,.auction-status{border:1px solid #405046;border-radius:9px;background:#18221b;padding:14px}.auction-summary span,.auction-summary small{display:block;color:#afbcaf;font-size:12px}.auction-summary strong{display:block;margin:4px 0;font-size:23px}.auction-status{margin:0 0 14px;line-height:1.4}.auction-status.success{border-color:#6fae69;background:#1f3523}.auction-status.error{border-color:#d38372;background:#402923}.auction-bar{align-items:flex-start}.auction-search label,.auction-advice label,.auction-teams label{display:block;color:#bce785;font-size:12px;font-weight:700}.auction-search input,.auction-advice input,.auction-advice select,.auction-teams input{margin-top:5px}.auction-results>span{display:block;padding:8px 10px;color:#afbcaf;font-size:12px}.auction-history{display:flex;gap:8px}.auction-history button,.auction-actions button{min-height:42px}.auction-advice label{min-width:155px}.auction-advice label select,.auction-advice label input{display:block;width:100%}.auction-actions{display:flex;flex-wrap:wrap;gap:8px}.auction-actions .secondary{background:#27342b}.auction-teams article label{color:#bce785;font-size:11px}.auction-teams article label input{width:100%;background:transparent;border:0;border-bottom:1px solid #526258;color:#fff;font-weight:750}.empty-roster{display:block;padding:12px 0;color:#98a698;font-size:13px}@media(max-width:760px){.auction-summary{grid-template-columns:1fr}.auction-bar{display:block}.auction-search{max-width:none}.auction-history{margin-top:10px}.auction-history button{flex:1}.auction-advice{display:grid;grid-template-columns:1fr;gap:12px}.auction-advice>div{min-width:0}.auction-advice label{min-width:0}.auction-actions button{flex:1 1 100%}}
+
+.auction-history .edit-toggle.is-active{background:#27342b;border-color:#6fae69;color:#d7f0c8}
+.auction-teams.is-editing article.editing{border-color:#6a8f62;box-shadow:0 0 0 1px rgba(111,174,105,.22)}
+.auction-team-flags .flag-edit{display:inline-flex;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;background:#1f3523;color:#bce785}
+.auction-teams .bid-row{display:flex;align-items:center;gap:6px;width:100%;margin:4px 0;padding:6px 8px;border:1px solid #405046;border-radius:7px;background:#141c16;color:#f7fff1;font-weight:700}
+.auction-teams .bid-row .role{flex:0 0 auto}
+.auction-teams .bid-row__name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.auction-teams .bid-row input{width:64px;flex:0 0 64px;margin:0;height:34px;border:1px solid #526258;border-radius:6px;background:#101712;color:#f7fff1;padding:0 8px;font-weight:750}
+.auction-teams .bid-row input:focus{outline:2px solid #6fae69;outline-offset:1px;border-color:#6fae69}
+.auction-teams .bid-delete{display:inline-flex;align-items:center;justify-content:center;background:transparent;border:1px solid #526258;color:#d38372;padding:0 8px;min-height:34px;min-width:34px;border-radius:6px;cursor:pointer}
+.auction-teams .bid-delete:hover{background:#402923;border-color:#d38372}
+.auction-teams .bid-delete:focus-visible{outline:2px solid #d38372;outline-offset:1px}
+
+.auction-teams article a.bid-player{display:flex;width:100%;gap:5px;align-items:center;background:transparent;border:0;padding:3px 0;text-align:left;font-size:12px;color:inherit;text-decoration:none;cursor:pointer}
+.auction-teams article a.bid-player:hover{color:#c8f491}
+.auction-teams article a.bid-player:focus-visible{outline:3px solid #cbff8b;outline-offset:2px}
+.auction-actions a.secondary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:10px 14px;border-radius:5px;background:#27342b;color:#fff;text-decoration:none;font-weight:700}
+.auction-actions a.secondary:hover{filter:brightness(1.08)}
+.auction-actions a.secondary:focus-visible{outline:3px solid #cbff8b;outline-offset:2px}

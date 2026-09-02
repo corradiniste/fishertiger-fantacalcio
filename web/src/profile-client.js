@@ -190,11 +190,24 @@ export const normalizeDataset = (payload, profile) => {
     fail(error.code, error.message, { details: error.details || validation.errors });
   }
   const legacy = payload.schema_version === undefined;
+  const profileCredits = object(profile).credits;
+  const starting =
+    profileCredits?.starting ??
+    object(profile).startingCredits ??
+    object(profile).starting_credits;
+  const leagueRules = {
+    ...object(payload.league_rules || payload.rules),
+  };
+  // Profile credits win over stale generated league_rules (save ≠ regenerate).
+  if (Number.isInteger(Number(starting)) && Number(starting) >= 1) {
+    leagueRules.starting_credits = Number(starting);
+    leagueRules.startingCredits = Number(starting);
+  }
   return {
     ...payload,
     schema_version: payload.schema_version || "legacy",
     meta: isObject(payload.meta) ? payload.meta : { legacy: true, profile: null },
-    league_rules: object(payload.league_rules || payload.rules),
+    league_rules: leagueRules,
     calendario_lega: payload.calendario_lega || payload.calendar,
     legacy,
   };
@@ -231,7 +244,10 @@ export const rulesFor = (profile, data = {}) => {
     userTeam: pick(participants.user_team, fallback.userTeam || fallback.user_team),
     rosterSlots: pick(source.roster_slots, fallback.rosterSlots || fallback.roster_slots),
     formations: pick(formations(source.formations?.allowed), fallback.formations),
-    startingCredits: pick(source.credits?.starting, fallback.startingCredits || fallback.starting_credits),
+    startingCredits: pick(
+      source.credits?.starting ?? source.startingCredits ?? source.starting_credits,
+      fallback.startingCredits ?? fallback.starting_credits,
+    ),
     bench: {
       roles: pick(bench.bench_roles, object(fallback.bench).roles || object(fallback.bench).bench_roles),
       maxSubstitutions: pick(bench.max_substitutions, object(fallback.bench).maxSubstitutions),
